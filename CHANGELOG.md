@@ -4,6 +4,10 @@
 
 First release.
 
+Supports Python 3.12, 3.13 and 3.14. Minimum dependency versions are the oldest with wheels for
+Python 3.12 (NumPy 1.26, SciPy 1.11.2, numba 0.59, scikit-learn 1.6) and, for joblib, the oldest
+that runs on Python 3.14 (1.5); the test suite passes at these minimums.
+
 ### Added
 - `BoolMF` estimator (alias `BooleanMF`): Bayesian Boolean matrix factorization with an Indian
   buffet process prior (`n_components=None`) or a fixed number of components.
