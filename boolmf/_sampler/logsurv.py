@@ -143,20 +143,24 @@ def accumulate_entries_ls(C, L, LB0, explained_acc, predictive_acc):
             predictive_acc[i, j] += -math.expm1(lb + L[i, j])
 
 
+@njit(cache=True)
+def _row_total(V, L, i, lb):
+    acc = 0.0
+    for j in range(V.shape[1]):
+        v = V[i, j]
+        if v >= 0:
+            acc += entry_ll(v, lb, L[i, j])
+    return acc
+
+
 @njit(parallel=True, cache=True)
 def total_loglik_ls(V, L, LB0):
-    n, F = V.shape
+    n = V.shape[0]
     rb = 1 if LB0.shape[0] > 1 else 0
-    tot = 0.0
+    rows = np.zeros(n)
     for i in prange(n):
-        lb = LB0[i * rb]
-        acc = 0.0
-        for j in range(F):
-            v = V[i, j]
-            if v >= 0:
-                acc += entry_ll(v, lb, L[i, j])
-        tot += acc
-    return tot
+        rows[i] = _row_total(V, L, i, LB0[i * rb])
+    return rows.sum()
 
 
 @njit(parallel=True, cache=True)
@@ -206,21 +210,24 @@ def _component_loglik(V, L, LB0, S, off, hv, k, act_ptr, act_idx, mem_ptr, mem_i
     ro = 1 if off.shape[0] > 1 else 0
     rb = 1 if LB0.shape[0] > 1 else 0
     a0 = act_ptr[k]
-    tot = 0.0
-    for t in prange(act_ptr[k + 1] - a0):
+    nc = act_ptr[k + 1] - a0
+    rows = np.zeros(nc)
+    for t in prange(nc):
         i = act_idx[a0 + t]
-        s_old = S[i * rs, k]
-        s_new = log1m_sigmoid(off[i * ro] + hv)
-        lb = LB0[i * rb]
-        acc = 0.0
-        for q in range(mem_ptr[k], mem_ptr[k + 1]):
-            j = mem_idx[q]
-            v = V[i, j]
-            if v < 0:
-                continue
+        rows[t] = _carrier_ll(V, L, i, S[i * rs, k], log1m_sigmoid(off[i * ro] + hv),
+                              LB0[i * rb], k, mem_ptr, mem_idx)
+    return rows.sum()
+
+
+@njit(cache=True)
+def _carrier_ll(V, L, i, s_old, s_new, lb, k, mem_ptr, mem_idx):
+    acc = 0.0
+    for q in range(mem_ptr[k], mem_ptr[k + 1]):
+        j = mem_idx[q]
+        v = V[i, j]
+        if v >= 0:
             acc += entry_ll(v, lb, L[i, j] - s_old + s_new)
-        tot += acc
-    return tot
+    return acc
 
 
 @njit(cache=True)
