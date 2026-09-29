@@ -38,7 +38,7 @@ def _ref_update_activations(V, Z, C, T1, T0, logit_pi, seed):
                 if v < 0:
                     continue
                 cm = C[i, j] - old
-                lo += (T1[cm + 1] - T1[cm]) if v == 1 else (T0[cm + 1] - T0[cm])
+                lo += (T1[i, cm + 1] - T1[i, cm]) if v == 1 else (T0[i, cm + 1] - T0[i, cm])
             state, u = _next(state)
             new = 1 if u * (1.0 + np.exp(-lo)) < 1.0 else 0
             if new != old:
@@ -60,6 +60,8 @@ def test_activation_kernel_matches_reference():
     U_REF = U
     C = counts_from_state(Z, U)
     T1, T0 = loglik_tables("noisy_or", 0.9, 0.05, K)
+    T1 = T1[None, :] + rng.normal(scale=0.1, size=(n, 1))    # per-sample tables
+    T0 = T0[None, :] + rng.normal(scale=0.1, size=(n, 1))
     logit_pi = rng.normal(size=K)
     seed = 123456789
     Z1, C1 = Z.copy(), C.copy()
@@ -80,6 +82,7 @@ def test_membership_kernel_keeps_counts_consistent():
     U = (rng.random((F, K)) < 0.3).astype(np.int8)
     C = counts_from_state(Z, U)
     T1, T0 = loglik_tables("or_flip", 0.9, 0.05, K)
+    T1, T0 = np.tile(T1, (n, 1)), np.tile(T0, (n, 1))
     ptr, idx = _csr(Z)
     update_memberships(V, U, C, T1, T0, rng.normal(size=K), ptr, idx, np.ones(K, bool),
                        np.uint64(7))

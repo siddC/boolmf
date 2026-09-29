@@ -106,9 +106,16 @@ class BoolMF(TransformerMixin, BaseEstimator):
         Components active in every sample, for example a core-genome component.
     binarize : float or None, default=None
         None requires 0/1 input (NaN = missing). A float maps values above it to 1.
+    detection_effects, background_effects : tuple of str, default=()
+        Levels at which the rate varies. ``("sample",)`` gives every sample its own rate,
+        a_i = sigmoid(y_i) with y_i ~ Normal(mu, sigma^2) on the logit scale; the spread sigma
+        is learned (half-Cauchy(0, 1) prior) and sigmoid(mu) is the population rate. Under
+        ``or_flip`` each sample's detection rate stays above its background rate. Per-feature
+        rates are planned for v0.3; ``"component"`` detection rates are not available yet.
     detection_prior, background_prior : scipy.stats frozen distribution, float or None
-        Priors on the two rates. None is Beta(1, 1). A float in (0, 1) fixes the rate. Any
-        distribution with support in [0, 1] is accepted.
+        Priors on the two rates (on the population rate when the rate varies by sample). None
+        is Beta(1, 1). A float in (0, 1) fixes the rate. Any distribution with support in
+        [0, 1] is accepted.
     membership_prior : scipy.stats.beta frozen distribution or None, default=None
         Prior on each component's membership rate. None is Beta(1, 1).
     alpha_prior : scipy.stats.gamma frozen distribution or None, default=None
@@ -174,7 +181,12 @@ class BoolMF(TransformerMixin, BaseEstimator):
     prevalence_ : ndarray
         Mean activation of each component across samples.
     detection_rate_, background_rate_ : float
-        Posterior means of the two rates.
+        Posterior mean rates; the population rate when the rate varies by sample.
+    detection_rate_per_sample_, background_rate_per_sample_ : ndarray of shape (n_samples,)
+        Posterior mean rate of each training sample; only when ``"sample"`` is in the matching
+        ``*_effects``. ``*_rate_per_sample_interval_`` holds 95% credible intervals, shape
+        (n_samples, 2), and ``detection_spread_`` / ``background_spread_`` the posterior mean
+        spread of the logit rates.
     alpha_ : float or None
         Posterior mean of the Indian buffet process concentration.
     n_components_draws_ : ndarray of shape (n_good_chains, n_draws)
@@ -203,6 +215,8 @@ class BoolMF(TransformerMixin, BaseEstimator):
         likelihood="or_flip",
         anchor_components=None,
         binarize=None,
+        detection_effects=(),
+        background_effects=(),
         detection_prior=None,
         background_prior=None,
         membership_prior=None,
@@ -229,6 +243,8 @@ class BoolMF(TransformerMixin, BaseEstimator):
         self.likelihood = likelihood
         self.anchor_components = anchor_components
         self.binarize = binarize
+        self.detection_effects = detection_effects
+        self.background_effects = background_effects
         self.detection_prior = detection_prior
         self.background_prior = background_prior
         self.membership_prior = membership_prior
@@ -257,6 +273,17 @@ class BoolMF(TransformerMixin, BaseEstimator):
         tags.input_tags.sparse = True
         return tags
 
+    def _levels(self, name):
+        value = getattr(self, name)
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            value = (value,)
+        try:
+            return tuple(value)
+        except TypeError:
+            raise ValueError(f"{name} must be a tuple of level names; got {value!r}.") from None
+
     def _n_split_merge(self):
         if isinstance(self.split_merge, (bool, np.bool_)):
             return DEFAULT_SPLIT_MERGE if self.split_merge else 0
@@ -272,6 +299,20 @@ class BoolMF(TransformerMixin, BaseEstimator):
             _int("n_components", 1)
         if self.max_components != "auto":
             _int("max_components", 1)
+        for name, allowed in (("detection_effects", ("sample",)),
+                              ("background_effects", ("sample",))):
+            levels = self._levels(name)
+            for lev in levels:
+                if lev == "feature":
+                    raise NotImplementedError(f"{name}: per-feature rates are planned for v0.3.")
+                if lev == "component" and name == "detection_effects":
+                    raise NotImplementedError(
+                        "detection_effects: per-component rates are not available yet.")
+                if lev not in allowed:
+                    raise ValueError(f"{name} must contain only {allowed}; got {lev!r}.")
+            prior = self.detection_prior if name.startswith("detection") else self.background_prior
+            if levels and isinstance(prior, numbers.Real) and not isinstance(prior, bool):
+                raise ValueError(f"{name} needs a free rate; the matching prior fixes it.")
         if self.likelihood not in LIKELIHOODS:
             raise ValueError(f"likelihood must be one of {LIKELIHOODS}; got {self.likelihood!r}.")
         _int("n_chains", 1)
@@ -369,6 +410,8 @@ class BoolMF(TransformerMixin, BaseEstimator):
             min_support=int(np.ceil(self.min_support)),
             burn_rhat=max(1.05, float(self.rhat_threshold)),
             n_split_merge=self._n_split_merge(),
+            detection_effects=self._levels("detection_effects"),
+            background_effects=self._levels("background_effects"),
             verbose=self.verbose,
         )
         results = Parallel(n_jobs=n_workers, verbose=0)(
@@ -559,6 +602,21 @@ class BoolMF(TransformerMixin, BaseEstimator):
         rates = np.concatenate([results[c].draw_rates for c in good])
         self.detection_rate_ = float(rates[:, 0].mean())
         self.background_rate_ = float(rates[:, 1].mean())
+        for kind in ("detection", "background"):
+            for attr in (f"{kind}_rate_per_sample_", f"{kind}_rate_per_sample_interval_",
+                         f"{kind}_spread_"):
+                if hasattr(self, attr):
+                    delattr(self, attr)                    # from an earlier fit
+            per = [results[c].draw_sample_rates.get(kind) for c in good]
+            if per[0] is None:
+                continue
+            per = np.concatenate(per)                          # (draws, n_samples)
+            setattr(self, f"{kind}_rate_per_sample_", per.mean(0).astype(float))
+            setattr(self, f"{kind}_rate_per_sample_interval_",
+                    np.quantile(per, [0.025, 0.975], axis=0).T.astype(float))
+            col = 0 if kind == "detection" else 1
+            spread = np.concatenate([results[c].draw_spread[:, col] for c in good])
+            setattr(self, f"{kind}_spread_", float(spread.mean()))
         self.alpha_ = float(np.nanmean(np.concatenate([results[c].draw_alpha for c in good]))) \
             if nonparametric else None
         if nonparametric and np.median(self.n_components_draws_) > 0.8 * n_free:

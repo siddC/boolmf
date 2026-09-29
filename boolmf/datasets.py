@@ -6,9 +6,21 @@ from sklearn.utils import check_random_state
 __all__ = ["make_boolean_factors", "make_nested_factors"]
 
 
+def _per_sample(rate, n, name):
+    r = np.asarray(rate, float)
+    if r.ndim == 0:
+        return np.full((n, 1), float(r))
+    if r.shape != (n,):
+        raise ValueError(f"{name} must be a float or an array of length n_samples ({n}).")
+    return r[:, None]
+
+
 def _observe(structure, detection, background, missing, rng):
-    X = np.where(structure, rng.random(structure.shape) < detection,
-                 rng.random(structure.shape) < background).astype(float)
+    n = structure.shape[0]
+    det = _per_sample(detection, n, "detection")
+    bg = _per_sample(background, n, "background")
+    X = np.where(structure, rng.random(structure.shape) < det,
+                 rng.random(structure.shape) < bg).astype(float)
     if missing > 0:
         X[rng.random(X.shape) < missing] = np.nan
     return X
@@ -23,7 +35,8 @@ def make_boolean_factors(n_samples=200, n_features=300, n_components=5, *, preva
     uniformly from ``prevalence``, and contains each feature with a rate drawn from
     ``membership``. An entry is structurally present when an active component contains the
     feature; it is observed as present with probability ``detection`` if so, ``background``
-    otherwise.
+    otherwise. ``detection`` and ``background`` may be arrays of length ``n_samples`` to give
+    each sample its own rate.
 
     Returns
     -------

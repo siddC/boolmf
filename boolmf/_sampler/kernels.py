@@ -6,10 +6,13 @@ V : int8 (n_samples, n_features)     1 present, 0 absent, -1 missing
 Z : int8 (n_samples, K)              activation of component k in sample i
 U : int8 (n_features, K)             membership of feature j in component k
 C : int16 (n_samples, n_features)    number of active components containing feature j in sample i
-T1, T0 : float64 (K + 2,)            log P(x = 1 | c) and log P(x = 0 | c) for c = 0 .. K + 1
+T1, T0 : float64 (n_rows, K + 2)     log P(x_ij = 1 | c) and log P(x_ij = 0 | c) for c = 0 .. K + 1:
+                                     one row per sample, or a single row shared by all samples
+                                     when the rates are global (row index i * rs, rs = 0 or 1)
 
-Both likelihoods enter the kernels only through the tables T1 and T0, so one kernel serves
-``likelihood="noisy_or"`` and ``likelihood="or_flip"``.
+Both likelihoods and every rate model enter the kernels only through the tables T1 and T0, so
+one kernel serves ``likelihood="noisy_or"`` and ``"or_flip"``, with global or per-sample rates.
+``project_activations`` (new samples) takes a single row of each table.
 
 Randomness uses a counter-based SplitMix64 stream per (sweep seed, row), so results do not depend
 on the number of threads or on how numba schedules them.
@@ -70,6 +73,7 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
     Gibbs step. Only samples where component k is active carry likelihood information.
     """
     F, K = U.shape
+    rs = 1 if T1.shape[0] > 1 else 0
     for j in prange(F):
         state = _row_state(seed, j)
         for k in range(K):
@@ -83,10 +87,11 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
                 if v < 0:
                     continue
                 cm = C[i, j] - old
+                ti = i * rs
                 if v == 1:
-                    lo += T1[cm + 1] - T1[cm]
+                    lo += T1[ti, cm + 1] - T1[ti, cm]
                 else:
-                    lo += T0[cm + 1] - T0[cm]
+                    lo += T0[ti, cm + 1] - T0[ti, cm]
             state, u = _next_uniform(state)
             new = np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0)
             if new != old:
@@ -100,8 +105,10 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
 def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask, seed):
     """Gibbs update of Z[i, k] for every sample i (in parallel) and component k."""
     n, K = Z.shape
+    rs = 1 if T1.shape[0] > 1 else 0
     for i in prange(n):
         state = _row_state(seed, i)
+        ti = i * rs
         for k in range(K):
             if not update_mask[k]:
                 continue
@@ -114,9 +121,9 @@ def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask,
                     continue
                 cm = C[i, j] - old
                 if v == 1:
-                    lo += T1[cm + 1] - T1[cm]
+                    lo += T1[ti, cm + 1] - T1[ti, cm]
                 else:
-                    lo += T0[cm + 1] - T0[cm]
+                    lo += T0[ti, cm + 1] - T0[ti, cm]
             state, u = _next_uniform(state)
             new = np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0)
             if new != old:
@@ -195,11 +202,34 @@ def count_histograms(V, C, cmax):
 
 @njit(parallel=True, cache=True)
 def accumulate_entries(C, T1, explained_acc, predictive_acc):
-    """explained_acc += (C >= 1); predictive_acc += P(x = 1 | C) for every entry."""
+    """explained_acc += (C >= 1); predictive_acc += P(x_ij = 1 | C_ij) for every entry."""
     n, F = C.shape
+    rs = 1 if T1.shape[0] > 1 else 0
     for i in prange(n):
         for j in range(F):
             c = C[i, j]
             if c >= 1:
                 explained_acc[i, j] += 1
-            predictive_acc[i, j] += np.exp(T1[c])
+            predictive_acc[i, j] += np.exp(T1[i * rs, c])
+
+
+@njit(parallel=True, cache=True)
+def row_histograms(V, C, cmax):
+    """Per-sample count histograms: H1[i, c], H0[i, c] = observed present / absent entries of
+    sample i with count c (capped at cmax)."""
+    n, F = V.shape
+    H1 = np.zeros((n, cmax + 1), np.int64)
+    H0 = np.zeros((n, cmax + 1), np.int64)
+    for i in prange(n):
+        for j in range(F):
+            v = V[i, j]
+            if v < 0:
+                continue
+            c = C[i, j]
+            if c > cmax:
+                c = cmax
+            if v == 1:
+                H1[i, c] += 1
+            else:
+                H0[i, c] += 1
+    return H1, H0

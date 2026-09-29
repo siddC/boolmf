@@ -37,6 +37,11 @@ Indian buffet process, α ~ Gamma(1, 1)); *u<sub>jk</sub>* ~ Bernoulli(ρ<sub>k<
 ρ<sub>k</sub> ~ Beta(1, 1); Beta(1, 1) priors on both rates by default. Pass `n_components=K` for
 a fixed number of components.
 
+Rates can vary by sample: `detection_effects=("sample",)` and `background_effects=("sample",)`
+give each sample its own rate, logit-normal around a population rate with a learned spread
+(`detection_rate_per_sample_`, with 95% intervals). A sample with a low detection rate points to
+an incomplete profile; one with a high background rate to many features no component explains.
+
 Inference runs several independent Gibbs chains (numba, parallel within and across chains).
 Each sweep adds Metropolis–Hastings moves on pairs of components (split, merge, reallocate, and
 rewrites that keep the fit), so chains can leave states that one-variable-at-a-time updates
