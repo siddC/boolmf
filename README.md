@@ -59,7 +59,7 @@ pip install boolmf            # once released
 pip install git+https://github.com/siddC/boolmf
 ```
 
-Requires Python 3.10+, NumPy, SciPy, scikit-learn 1.6+, numba and joblib. No compiler is needed.
+Requires Python 3.12 or later, NumPy, SciPy, scikit-learn 1.6+, numba and joblib. No compiler is needed.
 
 ## Status
 
