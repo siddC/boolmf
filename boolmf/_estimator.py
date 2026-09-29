@@ -20,9 +20,12 @@ from ._model import (
 )
 from ._sampler.chain import ChainConfig, run_chain
 from ._sampler.kernels import project_activations
+from ._sampler.splitmerge import MOVE_NAMES
 from .diagnostics import ess, rhat
 from .matching import match_components
 from .utils.validation import row_seeds, to_binary_int8
+
+DEFAULT_SPLIT_MERGE = 10          # proposals per sweep when split_merge=True
 
 __all__ = ["BoolMF", "AnchorComponent"]
 
@@ -122,6 +125,14 @@ class BoolMF(TransformerMixin, BaseEstimator):
         Posterior draws kept per chain.
     thin : int or "auto", default="auto"
         Sweeps between kept draws. ``"auto"`` uses the autocorrelation of the log-likelihood.
+    split_merge : bool or int, default=True
+        Metropolis–Hastings moves on pairs of components after each Gibbs sweep. Each proposes
+        splitting a component in two, merging two, reallocating samples and features between
+        two (restricted Gibbs proposals, Jain & Neal 2004), or rewriting two components without
+        changing which entries they cover (moving shared features into the component whose
+        carriers contain the other's). They let chains leave states that single-variable Gibbs
+        updates cannot, such as two components merged into one. True makes 10 proposals per
+        sweep, an int sets the number, False (or 0) turns them off.
     rhat_threshold : float, default=1.01
         Convergence cut-off. A warning is raised when the cross-chain R-hat of the detection or
         background rate exceeds ``max(1.05, rhat_threshold)``.
@@ -170,6 +181,9 @@ class BoolMF(TransformerMixin, BaseEstimator):
         Posterior draws of the number of active (non-anchor) components.
     rhat_, ess_ : dict
         Cross-chain R-hat and effective sample size of the monitored scalars.
+    split_merge_acceptance_ : dict
+        Share of proposals accepted per move type (split, merge, reallocate, factor,
+        unfactor), pooled over chains.
     log_likelihood_trace_ : ndarray of shape (n_chains, max_sweeps_run)
         Log-likelihood per sweep, NaN-padded.
     chain_status_ : ndarray of str
@@ -198,6 +212,7 @@ class BoolMF(TransformerMixin, BaseEstimator):
         burn_in="auto",
         n_draws=100,
         thin="auto",
+        split_merge=True,
         rhat_threshold=1.01,
         min_ess=400,
         init="random",
@@ -223,6 +238,7 @@ class BoolMF(TransformerMixin, BaseEstimator):
         self.burn_in = burn_in
         self.n_draws = n_draws
         self.thin = thin
+        self.split_merge = split_merge
         self.rhat_threshold = rhat_threshold
         self.min_ess = min_ess
         self.init = init
@@ -241,6 +257,11 @@ class BoolMF(TransformerMixin, BaseEstimator):
         tags.input_tags.sparse = True
         return tags
 
+    def _n_split_merge(self):
+        if isinstance(self.split_merge, (bool, np.bool_)):
+            return DEFAULT_SPLIT_MERGE if self.split_merge else 0
+        return int(self.split_merge)
+
     def _check_params(self):
         def _int(name, lo):
             v = getattr(self, name)
@@ -256,6 +277,8 @@ class BoolMF(TransformerMixin, BaseEstimator):
         _int("n_chains", 1)
         _int("max_sweeps", 2)
         _int("n_draws", 1)
+        if not isinstance(self.split_merge, (bool, np.bool_)):
+            _int("split_merge", 0)
         if self.burn_in != "auto":
             _int("burn_in", 0)
         if self.thin != "auto":
@@ -345,6 +368,7 @@ class BoolMF(TransformerMixin, BaseEstimator):
             n_threads=n_threads,
             min_support=int(np.ceil(self.min_support)),
             burn_rhat=max(1.05, float(self.rhat_threshold)),
+            n_split_merge=self._n_split_merge(),
             verbose=self.verbose,
         )
         results = Parallel(n_jobs=n_workers, verbose=0)(
@@ -432,6 +456,10 @@ class BoolMF(TransformerMixin, BaseEstimator):
         if nonparametric:
             traces["alpha"] = np.stack([results[c].draw_alpha[-L:] for c in good])
         self.rhat_ = {k: rhat(v) for k, v in traces.items()}
+        sm = np.sum([r.split_merge for r in results], axis=0)
+        self.split_merge_acceptance_ = {
+            name: float(sm[1, t] / sm[0, t]) if sm[0, t] else float("nan")
+            for t, name in enumerate(MOVE_NAMES)}
         self.ess_ = {k: ess(v) for k, v in traces.items()}
         # The log-likelihood and component count mix slowly because short-lived components
         # that absorb noise come and go; they are reported but do not trigger warnings.

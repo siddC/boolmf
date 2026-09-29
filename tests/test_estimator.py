@@ -35,6 +35,8 @@ def test_fitted_attribute_shapes(small_data, fitted):
     assert set(fitted.component_flags_) <= {"anchor", "robust", "low_support", "not_robust"}
     assert fitted.log_likelihood_trace_.shape[0] == 2
     assert set(fitted.rhat_) == set(fitted.ess_)
+    assert set(fitted.split_merge_acceptance_) == {
+        "split", "merge", "reallocate", "factor", "unfactor"}
     assert fitted.n_features_in_ == X.shape[1]
 
 
@@ -182,6 +184,8 @@ def test_input_validation(small_data):
         BoolMF(likelihood="gaussian").fit(X)
     with pytest.raises(ValueError):
         BoolMF(n_chains=0).fit(X)
+    with pytest.raises(ValueError):
+        BoolMF(split_merge=-1).fit(X)
 
 
 def test_sparse_and_dataframe_input(small_data):
@@ -195,3 +199,12 @@ def test_sparse_and_dataframe_input(small_data):
     df = pd.DataFrame(X, columns=[f"g{i}" for i in range(X.shape[1])])
     c = BoolMF(**FAST).fit(df)
     assert list(c.feature_names_in_[:2]) == ["g0", "g1"]
+
+
+def test_split_merge_can_be_turned_off(small_data):
+    X, truth = small_data
+    m = BoolMF(split_merge=False, **FAST).fit(X)
+    assert all(np.isnan(v) for v in m.split_merge_acceptance_.values())
+    members, _ = m.binarize_components()
+    robust = m.component_flags_ == "robust"
+    assert jaccard_matrix(truth["members"], members[robust]).max(axis=1).min() > 0.9

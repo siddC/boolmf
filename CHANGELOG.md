@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+### Added
+- Split–merge moves (`split_merge=True`, 10 proposals per sweep; an int sets the number, False
+  turns them off). Each proposal changes two components at once and is accepted with the exact
+  Metropolis–Hastings probability:
+  - split, merge and reallocate, proposed by restricted Gibbs scans from a launch state that
+    depends only on the union of the two components (Jain & Neal 2004);
+  - factor and unfactor, rewrites that keep which entries are covered: shared features move into
+    the component whose carriers contain the other's, or back.
+  Partners for merge, reallocate, factor and unfactor are drawn by similarity (Jaccard of
+  carriers plus Jaccard of members), and the reverse selection probability is computed in the
+  proposed state. `split_merge_acceptance_` reports acceptance rates per move type.
+- Tests that apply the moves to draws from the exact posterior of small problems (enumerated)
+  and check that the draws still follow it.
+
+### Changed
+- Nested-factors benchmark (500 samples, 20 true components, 8 chains; seeds 0 and 1), before →
+  after, `or_flip`:
+  - chains flagged `stuck`: 1 → 0 on both seeds;
+  - cross-chain R-hat of the detection rate: 1.33 → 1.004 and 1.005;
+  - held-out perplexity gap to the true model: 0.0084 → 0.0056 (seed 0), 0.0082 → 0.0057
+    (seed 1); calibration: 0.995 and 0.996 → 1.000;
+  - overlapping components recovered: 10/12 and 10/12 → 10/12 and 11/12. The component that lives in 60%
+    of a small group, which 7 of 8 chains used to fold into its group, is now found by all
+    chains. The remaining misses are the nested and partial components, which the chains write
+    in an equivalent form (same covered entries, features attached to the component
+    whose carriers always carry them);
+  - run time: 582 and 590 s → 482 and 462 s (fewer spurious components to update).
+  Still open: R-hat of the background rate, alpha and the log-likelihood reaches 1.17, 1.17 and
+  1.8 on seed 1, because chains differ in how many small components absorb noise.
+- The default likelihood stays `"or_flip"`. With these moves `"noisy_or"` recovers the same
+  components with the same fit, but the number of supported components mixes worse across chains
+  (R-hat 2.1 and 1.9 against 1.01 and 1.02).
+- Version 0.2.0.dev0.
+
 ## 0.1.0 (unreleased)
 
 First release.

@@ -56,6 +56,8 @@ def main():
     print(f"  detection {m.detection_rate_:.4f} background {m.background_rate_:.4f}; "
           f"chain status {list(map(str, m.chain_status_))}")
     print(f"  rhat {({k: round(v, 3) for k, v in m.rhat_.items()})}")
+    acc = {k: round(v, 3) for k, v in m.split_merge_acceptance_.items()}
+    print(f"  split-merge acceptance {acc}")
 
 
 if __name__ == "__main__":
