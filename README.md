@@ -63,8 +63,7 @@ Requires Python 3.12 or later, NumPy, SciPy, scikit-learn 1.6+, numba and joblib
 
 ## Status
 
-Version 0.1 (alpha). See `CHANGELOG.md` for what is implemented and the roadmap for per-sample,
-per-feature and per-component rates, split–merge moves and weighted population summaries.
+Version 0.1 (alpha). `CHANGELOG.md` lists what is implemented and `ROADMAP.md` what comes next.
 
 ## References
 
