@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest, windows-latest and Python 3.15 are added before release.
+        # macos-latest and windows-latest join after v0.2, Python 3.15 after v0.3 (ROADMAP.md).
         os: [ubuntu-latest]
         python-version: ["3.12", "3.13", "3.14"]
     steps:
