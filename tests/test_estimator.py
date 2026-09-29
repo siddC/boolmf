@@ -234,9 +234,33 @@ def test_rate_effect_validation(small_data):
     X, _ = small_data
     with pytest.raises(NotImplementedError, match="v0.3"):
         BoolMF(detection_effects=("feature",)).fit(X)
-    with pytest.raises(NotImplementedError):
-        BoolMF(detection_effects=("component",)).fit(X)
+    with pytest.raises(ValueError, match="requires likelihood='noisy_or'"):
+        BoolMF(detection_effects=("component",)).fit(X)        # default or_flip
     with pytest.raises(ValueError):
         BoolMF(background_effects=("component",)).fit(X)
     with pytest.raises(ValueError, match="fixes"):
         BoolMF(detection_effects=("sample",), detection_prior=0.9).fit(X)
+
+
+def test_per_component_rates_noisy_or():
+    lam = np.array([0.6, 0.8, 0.97])
+    X, truth = make_boolean_factors(n_samples=150, n_features=200, n_components=3,
+                                    component_detection=lam, background=0.01, random_state=2,
+                                    return_truth=True)
+    m = BoolMF(likelihood="noisy_or", detection_effects=("component",), **FAST).fit(X)
+    K = m.components_.shape[0]
+    assert m.detection_rate_per_component_.shape == (K,)
+    assert m.detection_rate_per_component_interval_.shape == (K, 2)
+    robust = np.flatnonzero(m.component_flags_ == "robust")
+    members, _ = m.binarize_components()
+    J = jaccard_matrix(truth["members"], members[robust])
+    est = m.detection_rate_per_component_[robust[J.argmax(1)]]
+    assert np.all(np.abs(est - lam) < 0.1)
+    assert m.detection_component_spread_ > 0
+    assert m.transform(X[:5]).shape == (5, K)                    # projection path
+    assert np.all(np.isfinite(m.inverse_transform(m.transform(X[:5]))))
+    m2 = BoolMF(likelihood="noisy_or", detection_effects=("sample", "component"),
+                background_effects=("sample",), **FAST).fit(X)
+    assert m2.detection_rate_per_sample_.shape == (150,)
+    assert m2.background_rate_per_sample_.shape == (150,)
+    assert np.isfinite(m2.detection_rate_per_component_[m2.component_flags_ == "robust"]).all()

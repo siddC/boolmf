@@ -20,6 +20,7 @@ from ._model import (
 )
 from ._sampler.chain import ChainConfig, run_chain
 from ._sampler.kernels import project_activations
+from ._sampler.logsurv import project_activations_ls
 from ._sampler.splitmerge import MOVE_NAMES
 from .diagnostics import ess, rhat
 from .matching import match_components
@@ -110,8 +111,12 @@ class BoolMF(TransformerMixin, BaseEstimator):
         Levels at which the rate varies. ``("sample",)`` gives every sample its own rate,
         a_i = sigmoid(y_i) with y_i ~ Normal(mu, sigma^2) on the logit scale; the spread sigma
         is learned (half-Cauchy(0, 1) prior) and sigmoid(mu) is the population rate. Under
-        ``or_flip`` each sample's detection rate stays above its background rate. Per-feature
-        rates are planned for v0.3; ``"component"`` detection rates are not available yet.
+        ``or_flip`` each sample's detection rate stays above its background rate.
+        ``detection_effects=("component",)`` gives every component its own detection rate
+        (logit-normal around the population rate, learned spread); it requires
+        ``likelihood="noisy_or"``, where each active component delivers each of its features
+        independently. With both levels, logit lambda_ik = y_i + g_k. Per-feature rates are
+        planned for v0.3.
     detection_prior, background_prior : scipy.stats frozen distribution, float or None
         Priors on the two rates (on the population rate when the rate varies by sample). None
         is Beta(1, 1). A float in (0, 1) fixes the rate. Any distribution with support in
@@ -187,6 +192,10 @@ class BoolMF(TransformerMixin, BaseEstimator):
         ``*_effects``. ``*_rate_per_sample_interval_`` holds 95% credible intervals, shape
         (n_samples, 2), and ``detection_spread_`` / ``background_spread_`` the posterior mean
         spread of the logit rates.
+    detection_rate_per_component_ : ndarray of shape (n_components_total,)
+        Posterior mean detection rate of each component (at the population level); only with
+        ``detection_effects`` containing ``"component"``. ``*_interval_`` holds 95% credible
+        intervals and ``detection_component_spread_`` the spread of the logit rates.
     alpha_ : float or None
         Posterior mean of the Indian buffet process concentration.
     n_components_draws_ : ndarray of shape (n_good_chains, n_draws)
@@ -299,17 +308,22 @@ class BoolMF(TransformerMixin, BaseEstimator):
             _int("n_components", 1)
         if self.max_components != "auto":
             _int("max_components", 1)
-        for name, allowed in (("detection_effects", ("sample",)),
+        for name, allowed in (("detection_effects", ("sample", "component")),
                               ("background_effects", ("sample",))):
             levels = self._levels(name)
             for lev in levels:
                 if lev == "feature":
                     raise NotImplementedError(f"{name}: per-feature rates are planned for v0.3.")
-                if lev == "component" and name == "detection_effects":
-                    raise NotImplementedError(
-                        "detection_effects: per-component rates are not available yet.")
                 if lev not in allowed:
                     raise ValueError(f"{name} must contain only {allowed}; got {lev!r}.")
+            if name == "detection_effects" and "component" in levels \
+                    and self.likelihood != "noisy_or":
+                raise ValueError(
+                    "detection_effects=('component',) requires likelihood='noisy_or'. Under "
+                    "'or_flip' an entry covered by several components is present with a single "
+                    "detection rate, so no component's own rate can be identified; under "
+                    "'noisy_or' each active component delivers its features independently, "
+                    "with its own rate.")
             prior = self.detection_prior if name.startswith("detection") else self.background_prior
             if levels and isinstance(prior, numbers.Real) and not isinstance(prior, bool):
                 raise ValueError(f"{name} needs a free rate; the matching prior fixes it.")
@@ -617,6 +631,25 @@ class BoolMF(TransformerMixin, BaseEstimator):
             col = 0 if kind == "detection" else 1
             spread = np.concatenate([results[c].draw_spread[:, col] for c in good])
             setattr(self, f"{kind}_spread_", float(spread.mean()))
+        for attr in ("detection_rate_per_component_", "detection_rate_per_component_interval_",
+                     "detection_component_spread_"):
+            if hasattr(self, attr):
+                delattr(self, attr)
+        if "component" in self._levels("detection_effects"):
+            lam = [[] for _ in range(len(flags))]
+            for c in good:
+                smap = self._slot_map_[c]
+                for slots, values in results[c].draw_slot_rates:
+                    for slot, value in zip(slots, values):
+                        k = smap.get(int(slot))
+                        if k is not None:
+                            lam[k].append(value)
+            self.detection_rate_per_component_ = np.array(
+                [np.mean(v) if v else np.nan for v in lam])
+            self.detection_rate_per_component_interval_ = np.array(
+                [np.quantile(v, [0.025, 0.975]) if v else [np.nan, np.nan] for v in lam])
+            self.detection_component_spread_ = float(np.mean(np.concatenate(
+                [results[c].draw_spread[:, 2] for c in good])))
         self.alpha_ = float(np.nanmean(np.concatenate([results[c].draw_alpha for c in good]))) \
             if nonparametric else None
         if nonparametric and np.median(self.n_components_draws_) > 0.8 * n_free:
@@ -637,6 +670,7 @@ class BoolMF(TransformerMixin, BaseEstimator):
                     self._draws_.append({
                         "chain": int(c), "slots": d["slots"], "U": d["U"], "Z": d["Z"],
                         "pi": d["pi"], "a": float(rate_a), "b": float(rate_b),
+                        "lam": d.get("lam"),
                     })
         self._n_train_samples_ = n
 
@@ -670,7 +704,6 @@ class BoolMF(TransformerMixin, BaseEstimator):
         for di, d in enumerate(draws):
             slots = d["slots"]
             U = np.unpackbits(d["U"], axis=0, count=F).astype(np.int8)
-            T1, T0 = loglik_tables(self.likelihood, d["a"], d["b"], U.shape[1])
             pi = np.clip(d["pi"], 1e-12, 1 - 1e-12)
             logit_pi = np.log(pi) - np.log1p(-pi)
             logit_pi[slots < self._n_anchor_] = 50.0
@@ -679,7 +712,14 @@ class BoolMF(TransformerMixin, BaseEstimator):
             np.cumsum(np.bincount(k, minlength=U.shape[1]), out=ptr[1:])
             with np.errstate(over="ignore"):
                 s = seeds ^ np.uint64((di + 1) * 0x9E3779B97F4A7C15 % 2**64)
-            z = project_activations(V, U, T1, T0, logit_pi, ptr, j.astype(np.int64), s, 40, 20)
+            if d.get("lam") is not None:          # per-component rates (noisy_or)
+                s_row = np.log1p(-np.clip(d["lam"], 0.0, 1.0 - 1e-12))
+                z = project_activations_ls(V, U, s_row, float(np.log1p(-d["b"])), logit_pi, ptr,
+                                           j.astype(np.int64), s, 40, 20)
+            else:
+                T1, T0 = loglik_tables(self.likelihood, d["a"], d["b"], U.shape[1])
+                z = project_activations(V, U, T1, T0, logit_pi, ptr, j.astype(np.int64), s, 40,
+                                        20)
             smap = self._slot_map_[d["chain"]]
             present = np.zeros(K, bool)
             for col, slot in enumerate(slots):
@@ -726,9 +766,13 @@ class BoolMF(TransformerMixin, BaseEstimator):
         n, F = Zp.shape[0], M.shape[1]
         a, b = self.detection_rate_, self.background_rate_
         log_none = np.zeros((n, F))
-        weight = a if self.likelihood == "noisy_or" else 1.0
+        if self.likelihood == "noisy_or":
+            weight = getattr(self, "detection_rate_per_component_", np.full(M.shape[0], a))
+            weight = np.where(np.isnan(weight), a, weight)
+        else:
+            weight = np.ones(M.shape[0])
         for k in range(M.shape[0]):
-            q = np.clip(np.outer(Zp[:, k], M[k]) * weight, 0.0, 1.0 - 1e-12)
+            q = np.clip(np.outer(Zp[:, k], M[k]) * weight[k], 0.0, 1.0 - 1e-12)
             log_none += np.log1p(-q)
         none = np.exp(log_none)
         if self.likelihood == "noisy_or":

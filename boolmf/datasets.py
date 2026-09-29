@@ -28,7 +28,7 @@ def _observe(structure, detection, background, missing, rng):
 
 def make_boolean_factors(n_samples=200, n_features=300, n_components=5, *, prevalence=(0.1, 0.5),
                          membership=(0.05, 0.2), detection=0.97, background=0.01, missing=0.0,
-                         random_state=None, return_truth=False):
+                         component_detection=None, random_state=None, return_truth=False):
     """Random Boolean factors observed through noisy-OR style noise.
 
     Each component is active in each sample with a component-specific prevalence drawn
@@ -37,6 +37,11 @@ def make_boolean_factors(n_samples=200, n_features=300, n_components=5, *, preva
     feature; it is observed as present with probability ``detection`` if so, ``background``
     otherwise. ``detection`` and ``background`` may be arrays of length ``n_samples`` to give
     each sample its own rate.
+
+    With ``component_detection`` (an array of length ``n_components``) the data follow the
+    noisy-OR model with per-component rates instead: each active component delivers each of its
+    features independently with its own probability, so
+    P(x_ij = 1) = 1 - (1 - background_i) * prod over covering k of (1 - component_detection[k]).
 
     Returns
     -------
@@ -51,7 +56,18 @@ def make_boolean_factors(n_samples=200, n_features=300, n_components=5, *, preva
     A = rng.random((n_samples, n_components)) < pi
     M = rng.random((n_components, n_features)) < rho[:, None]
     S = (A.astype(np.int32) @ M.astype(np.int32)) > 0
-    X = _observe(S, detection, background, missing, rng)
+    if component_detection is not None:
+        lam = np.asarray(component_detection, float)
+        if lam.shape != (n_components,):
+            raise ValueError("component_detection must have length n_components.")
+        log_none = A.astype(float) @ (M * np.log1p(-lam)[:, None])
+        bg = _per_sample(background, n_samples, "background")
+        p1 = 1.0 - (1.0 - bg) * np.exp(log_none)
+        X = (rng.random(S.shape) < p1).astype(float)
+        if missing > 0:
+            X[rng.random(X.shape) < missing] = np.nan
+    else:
+        X = _observe(S, detection, background, missing, rng)
     if return_truth:
         return X, {"members": M, "activations": A, "structure": S}
     return X

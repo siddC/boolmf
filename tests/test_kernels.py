@@ -87,3 +87,59 @@ def test_membership_kernel_keeps_counts_consistent():
     update_memberships(V, U, C, T1, T0, rng.normal(size=K), ptr, idx, np.ones(K, bool),
                        np.uint64(7))
     np.testing.assert_array_equal(C, counts_from_state(Z, U))
+
+
+def test_log_survival_kernels_match_reference_and_keep_L_consistent():
+    from boolmf._sampler.logsurv import (
+        entry_ll,
+        logsurv_from_state,
+        update_activations_ls,
+        update_memberships_ls,
+    )
+
+    rng = np.random.default_rng(3)
+    n, F, K = 25, 20, 4
+    V = (rng.random((n, F)) < 0.3).astype(np.int8)
+    V[rng.random((n, F)) < 0.1] = -1
+    Z = (rng.random((n, K)) < 0.4).astype(np.int8)
+    U = (rng.random((F, K)) < 0.3).astype(np.int8)
+    S = np.log1p(-rng.uniform(0.5, 0.95, size=(n, K)))      # per-sample, per-component
+    LB0 = np.log1p(-rng.uniform(0.01, 0.1, size=n))
+    logit_pi = rng.normal(size=K)
+    seed = 987654321
+
+    def L_of(Zm, Um):
+        ptr, idx = _csr(Um)
+        return logsurv_from_state(Zm, S, ptr, idx, F)
+
+    # reference activation update (same random stream)
+    Z1, L1 = Z.copy(), L_of(Z, U)
+    ptr, idx = _csr(U)
+    update_activations_ls(V, Z1, L1, LB0, S, logit_pi, ptr, idx, np.ones(K, bool),
+                          np.uint64(seed))
+    Z2, L2 = Z.copy(), L_of(Z, U)
+    for i in range(n):
+        state = _row_state(seed, i)
+        for k in range(K):
+            members = np.flatnonzero(U[:, k])
+            old = Z2[i, k]
+            lo = logit_pi[k]
+            for j in members:
+                if V[i, j] < 0:
+                    continue
+                Lm = L2[i, j] - old * S[i, k]
+                lo += entry_ll(V[i, j], LB0[i], Lm + S[i, k]) - entry_ll(V[i, j], LB0[i], Lm)
+            state, u = _next(state)
+            new = 1 if u * (1.0 + np.exp(-lo)) < 1.0 else 0
+            if new != old:
+                L2[i, members] += (new - old) * S[i, k]
+                Z2[i, k] = new
+    np.testing.assert_array_equal(Z1, Z2)
+    np.testing.assert_allclose(L1, L2, atol=1e-12)
+    np.testing.assert_allclose(L1, L_of(Z1, U), atol=1e-12)
+
+    # membership update keeps L consistent
+    act_ptr, act_idx = _csr(Z1)
+    update_memberships_ls(V, U, L1, LB0, S, rng.normal(size=K), act_ptr, act_idx,
+                          np.ones(K, bool), np.uint64(7))
+    np.testing.assert_allclose(L1, L_of(Z1, U), atol=1e-12)

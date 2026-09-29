@@ -122,3 +122,55 @@ def test_split_merge_with_three_free_slots():
     big = expected >= 5
     chi2 = ((counts[big] - expected[big]) ** 2 / expected[big]).sum()
     assert stats.chi2.sf(chi2, big.sum() - 1) > 1e-3
+
+
+def test_split_merge_log_survival_form_preserves_exact_posterior():
+    """noisy_or with per-component rates: two free slots with different detection rates (so
+    slot labels matter), a per-sample background rate and a missing entry."""
+    from boolmf._sampler.logsurv import entry_ll
+    from boolmf._sampler.splitmerge import split_merge_moves_logsurv
+
+    V3 = np.array([[1, 1, 0], [1, 0, -1], [0, 1, 1]], np.int8)
+    n, F, K = 3, 3, 2
+    zprior, uprior = (0.4, 1.0), (1.0, 1.0)
+    S = np.log1p(-np.array([[0.8, 0.6]]))              # one shared row, per-slot rates
+    LB0 = np.log1p(-np.array([0.2, 0.1, 0.25]))        # per-sample background
+    bz, bu = n * K, F * K
+    codes = np.arange(1 << (bz + bu))
+    Zs = (((codes[:, None] >> bu) >> np.arange(bz)) & 1).reshape(-1, n, K).astype(np.int8)
+    Us = ((codes[:, None] >> np.arange(bu)) & 1).reshape(-1, F, K).astype(np.int8)
+    L_all = np.einsum("sik,sjk,k->sij", Zs.astype(float), Us.astype(float), S[0])
+    logp = np.zeros(codes.size)
+    for s in range(codes.size):
+        for i in range(n):
+            for j in range(F):
+                if V3[i, j] >= 0:
+                    logp[s] += entry_ll(V3[i, j], LB0[i], L_all[s, i, j])
+        for k in range(K):
+            logp[s] += _log_beta_bernoulli(int(Zs[s, :, k].sum()), *zprior, n)
+            logp[s] += _log_beta_bernoulli(int(Us[s, :, k].sum()), *uprior, F)
+    p = np.exp(logp - logp.max())
+    p /= p.sum()
+    wz, wu = 1 << np.arange(bz), 1 << np.arange(bu)
+
+    rng = np.random.default_rng(5)
+    n_draws = 60000
+    moves = np.zeros((2, 5), np.int64)
+    counts = np.zeros(p.size)
+    for code in rng.choice(p.size, n_draws, p=p):
+        Z, U = Zs[code].copy(), Us[code].copy()
+        L = L_all[code].copy()
+        split_merge_moves_logsurv(V3, Z, U, L, S, LB0, np.ones(K, bool), zprior, uprior, 3, 2,
+                                  rng, moves)
+        expected_L = (Z.astype(float) * S[0]) @ U.T.astype(float)
+        np.testing.assert_allclose(L, expected_L, atol=1e-12)
+        counts[(int(Z.ravel() @ wz) << bu) | int(U.ravel() @ wu)] += 1
+    assert (moves[1, :3] > 300).all()
+    expected = p * n_draws
+    big = expected >= 5
+    chi2 = ((counts[big] - expected[big]) ** 2 / expected[big]).sum()
+    assert stats.chi2.sf(chi2, big.sum() - 1) > 1e-3
+    used = ((Zs.sum(1) > 0) & (Us.sum(1) > 0)).sum(1)
+    obs_used = np.array([counts[used == c].sum() for c in range(K + 1)])
+    exp_used = np.array([expected[used == c].sum() for c in range(K + 1)])
+    assert stats.chi2.sf(((obs_used - exp_used) ** 2 / exp_used).sum(), K) > 1e-3

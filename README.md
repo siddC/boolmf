@@ -41,6 +41,9 @@ Rates can vary by sample: `detection_effects=("sample",)` and `background_effect
 give each sample its own rate, logit-normal around a population rate with a learned spread
 (`detection_rate_per_sample_`, with 95% intervals). A sample with a low detection rate points to
 an incomplete profile; one with a high background rate to many features no component explains.
+With `likelihood="noisy_or"`, `detection_effects=("component",)` gives each component its own
+detection rate (`detection_rate_per_component_`): how completely its features show up in its
+carriers.
 
 Inference runs several independent Gibbs chains (numba, parallel within and across chains).
 Each sweep adds Metropolis–Hastings moves on pairs of components (split, merge, reallocate, and
