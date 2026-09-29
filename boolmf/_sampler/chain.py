@@ -14,6 +14,7 @@ from .kernels import (
     update_activations,
     update_memberships,
 )
+from .splitmerge import N_MOVES, split_merge_moves
 
 MONITORED = ("log_likelihood", "n_active", "detection_rate", "background_rate", "alpha")
 # alpha mixes slowly and is reported, but it does not gate the end of burn-in
@@ -44,6 +45,8 @@ class ChainConfig:
     n_threads: int = 0
     min_support: int = 3
     burn_rhat: float = 1.05
+    n_split_merge: int = 10           # split-merge attempts per sweep (0 = off)
+    n_launch: int = 4                 # restricted Gibbs scans that build each launch state
     verbose: int = 0
 
 
@@ -63,6 +66,7 @@ class ChainResult:
     draw_alpha: np.ndarray = None
     draw_n_active: np.ndarray = None
     draw_loglik: np.ndarray = None
+    split_merge: np.ndarray = None    # (2, N_MOVES): attempts and acceptances per move type
 
 
 def _csr(B):
@@ -139,6 +143,7 @@ def run_chain(V, cfg, seed, init):
     predictive = np.zeros((n, F), np.float32) if cfg.store_entries else None
     draws, d_rates, d_alpha, d_nact, d_ll = [], [], [], [], []
     n_kept = 0
+    sm_stats = np.zeros((2, N_MOVES), np.int64)
     sweep = 0
     sampling_start = None
     passes = 0
@@ -162,6 +167,15 @@ def run_chain(V, cfg, seed, init):
         if orphan.any():
             U[:, orphan] = 0                       # carrier-less slots keep no members
         nmem = U.sum(0, dtype=np.int64)
+        if cfg.n_split_merge > 0:
+            phantom = free & (nmem == 0)
+            if phantom.any():
+                Z[:, phantom] = 0                  # so every free slot is used or empty
+            zprior = (alpha / Kf, 1.0) if cfg.nonparametric else (1.0, 1.0)
+            split_merge_moves(V, Z, U, C, T1, T0, free, zprior, (ra, rb), cfg.n_split_merge,
+                              cfg.n_launch, rng, sm_stats)
+            nmem = U.sum(0, dtype=np.int64)
+            nact = Z.sum(0, dtype=np.int64)
 
         rho = rng.beta(ra + nmem, rb + F - nmem).astype(np.float64)
         if cfg.nonparametric:
@@ -258,6 +272,7 @@ def run_chain(V, cfg, seed, init):
         draw_alpha=np.asarray(d_alpha, float),
         draw_n_active=np.asarray(d_nact, int),
         draw_loglik=np.asarray(d_ll, float),
+        split_merge=sm_stats,
     )
     if cfg.store_entries:
         res.explained = (explained.astype(np.float32) / n_kept)

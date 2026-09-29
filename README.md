@@ -37,9 +37,11 @@ Indian buffet process, α ~ Gamma(1, 1)); *u<sub>jk</sub>* ~ Bernoulli(ρ<sub>k<
 ρ<sub>k</sub> ~ Beta(1, 1); Beta(1, 1) priors on both rates by default. Pass `n_components=K` for
 a fixed number of components.
 
-Inference runs several independent Gibbs chains (numba, parallel within and across chains),
-matches components across chains with the Hungarian algorithm on Jaccard similarity, and pools
-the draws. Components are flagged `robust`, `low_support` or `not_robust`; convergence is
+Inference runs several independent Gibbs chains (numba, parallel within and across chains).
+Each sweep adds Metropolis–Hastings moves on pairs of components (split, merge, reallocate, and
+rewrites that keep the fit), so chains can leave states that one-variable-at-a-time updates
+cannot. Components are matched across chains with the Hungarian algorithm on Jaccard
+similarity, and the draws are pooled. Components are flagged `robust`, `low_support` or `not_robust`; convergence is
 reported with rank-normalized split R-hat and effective sample size (`rhat_`, `ess_`).
 
 ## Validation
@@ -69,6 +71,7 @@ Version 0.1 (alpha). `CHANGELOG.md` lists what is implemented and `ROADMAP.md` w
 
 - Wood, Griffiths & Ghahramani (2006). A non-parametric Bayesian method for inferring hidden causes. UAI.
 - Rukat, Holmes, Titsias & Yau (2017). Bayesian Boolean matrix factorisation. ICML.
+- Jain & Neal (2004). A split-merge Markov chain Monte Carlo procedure for the Dirichlet process mixture model. Journal of Computational and Graphical Statistics.
 - Griffiths & Ghahramani (2011). The Indian buffet process: an introduction and review. JMLR.
 - Vehtari, Gelman, Simpson, Carpenter & Bürkner (2021). Rank-normalization, folding, and localization: an improved R-hat. Bayesian Analysis.
 - Barbieri & Berger (2004). Optimal predictive model selection. Annals of Statistics.
