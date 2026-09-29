@@ -3,6 +3,7 @@ import pytest
 from scipy import stats
 
 from boolmf import AnchorComponent, BooleanMF, BoolMF
+from boolmf.datasets import make_boolean_factors
 from boolmf.matching import jaccard_matrix
 
 from .conftest import FAST
@@ -208,3 +209,34 @@ def test_split_merge_can_be_turned_off(small_data):
     members, _ = m.binarize_components()
     robust = m.component_flags_ == "robust"
     assert jaccard_matrix(truth["members"], members[robust]).max(axis=1).min() > 0.9
+
+
+def test_per_sample_rates():
+    rng = np.random.default_rng(0)
+    n = 150
+    det = 1 / (1 + np.exp(-(np.log(9.0) + rng.normal(0, 1.0, n))))
+    bg = 1 / (1 + np.exp(-(np.log(0.01 / 0.99) + rng.normal(0, 0.7, n))))
+    X = make_boolean_factors(n_samples=n, n_features=200, n_components=4, detection=det,
+                             background=bg, random_state=1)
+    m = BoolMF(detection_effects=("sample",), background_effects="sample", **FAST).fit(X)
+    assert m.detection_rate_per_sample_.shape == m.background_rate_per_sample_.shape == (n,)
+    lo, hi = m.detection_rate_per_sample_interval_.T
+    assert np.all(lo <= m.detection_rate_per_sample_) and np.all(m.detection_rate_per_sample_ <= hi)
+    assert np.all(m.background_rate_per_sample_ < m.detection_rate_per_sample_)   # or_flip order
+    assert np.corrcoef(m.detection_rate_per_sample_, det)[0, 1] > 0.5
+    assert 0.3 < m.detection_spread_ < 3.0
+    # refitting without effects removes the per-sample attributes
+    m.set_params(detection_effects=(), background_effects=()).fit(X)
+    assert not hasattr(m, "detection_rate_per_sample_")
+
+
+def test_rate_effect_validation(small_data):
+    X, _ = small_data
+    with pytest.raises(NotImplementedError, match="v0.3"):
+        BoolMF(detection_effects=("feature",)).fit(X)
+    with pytest.raises(NotImplementedError):
+        BoolMF(detection_effects=("component",)).fit(X)
+    with pytest.raises(ValueError):
+        BoolMF(background_effects=("component",)).fit(X)
+    with pytest.raises(ValueError, match="fixes"):
+        BoolMF(detection_effects=("sample",), detection_prior=0.9).fit(X)

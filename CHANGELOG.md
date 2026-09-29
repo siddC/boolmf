@@ -15,6 +15,20 @@
   proposed state. `split_merge_acceptance_` reports acceptance rates per move type.
 - Tests that apply the moves to draws from the exact posterior of small problems (enumerated)
   and check that the draws still follow it.
+- Per-sample rates: `detection_effects=("sample",)` and `background_effects=("sample",)` (the
+  spec's parameters). Each sample's rate is logit-normal around the population rate, whose
+  prior is `detection_prior` / `background_prior`; the spread has a half-Cauchy(0, 1) prior.
+  All updates are slice sampling; under `or_flip` each sample keeps detection above
+  background. New attributes `detection_rate_per_sample_`, `background_rate_per_sample_`, their
+  `*_interval_` (95%) and `detection_spread_` / `background_spread_`. New samples in
+  `transform` and `score` use the population rates. `make_boolean_factors` accepts per-sample
+  `detection` and `background` arrays.
+  On a simulation with per-sample rates (300 samples, 6 components, logit spreads 1.0 and 0.7),
+  with either likelihood all 4 chains converge (without effects: 1 of 4 under `or_flip`, 0 of 4
+  under `noisy_or`), held-out log density improves from -0.102 to -0.098, the spreads are
+  recovered (1.10 and 0.68, true 1.0 and 0.7) and 95% intervals cover 94-95% of the true rates.
+  Under `or_flip` a spurious seventh component also disappears.
+  Per-component and per-feature rates are not implemented yet (`NotImplementedError`).
 
 ### Changed
 - Nested-factors benchmark (500 samples, 20 true components, 8 chains; seeds 0 and 1), before →
