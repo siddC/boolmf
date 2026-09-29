@@ -28,7 +28,20 @@
   under `noisy_or`), held-out log density improves from -0.102 to -0.098, the spreads are
   recovered (1.10 and 0.68, true 1.0 and 0.7) and 95% intervals cover 94-95% of the true rates.
   Under `or_flip` a spurious seventh component also disappears.
-  Per-component and per-feature rates are not implemented yet (`NotImplementedError`).
+  Per-feature rates are not implemented yet (`NotImplementedError`).
+- Per-component detection rates with `likelihood="noisy_or"`:
+  `detection_effects=("component",)`, alone or with `"sample"`. Each active component delivers
+  each of its features independently with its own rate, logit-normal around the population rate
+  with a learned spread; with both levels logit lambda_ik = y_i + g_k. Asking for component rates
+  with `or_flip` raises `ValueError`: there a covered entry has a single detection rate however
+  many components cover it, so no component's own rate can be identified. New attributes
+  `detection_rate_per_component_`, its `_interval_` (95%) and `detection_component_spread_`.
+  Inference keeps L[i, j] = sum of log(1 - lambda_ik) over covering components and updates one
+  component's rate at a time by slice sampling on the entries it covers; an exact move along the
+  direction the likelihood cannot see (population rate and sample offsets up, component offsets
+  down) keeps the two levels from drifting. Split–merge moves, `transform` and
+  `inverse_transform` use the per-component rates. `make_boolean_factors` gains
+  `component_detection` to simulate this model.
 
 ### Changed
 - Nested-factors benchmark (500 samples, 20 true components, 8 chains; seeds 0 and 1), before →

@@ -5,24 +5,9 @@ from dataclasses import dataclass, field
 import numba
 import numpy as np
 
-from .._model import (
-    histogram_loglik,
-    loglik_tables,
-    slice_sample_unit,
-    truncated_beta,
-    update_rates,
-)
 from ..diagnostics import ess, geweke, segment_rhat
-from .kernels import (
-    accumulate_entries,
-    count_histograms,
-    counts_from_state,
-    row_histograms,
-    update_activations,
-    update_memberships,
-)
-from .rates import SampleRates, likelihood_code, rows_loglik, table_rows
-from .splitmerge import N_MOVES, split_merge_moves
+from .engines import make_engine
+from .splitmerge import N_MOVES
 
 MONITORED = ("log_likelihood", "n_active", "detection_rate", "background_rate", "alpha")
 # alpha mixes slowly and is reported, but it does not gate the end of burn-in
@@ -55,7 +40,7 @@ class ChainConfig:
     burn_rhat: float = 1.05
     n_split_merge: int = 10           # split-merge attempts per sweep (0 = off)
     n_launch: int = 4                 # restricted Gibbs scans that build each launch state
-    detection_effects: tuple = ()     # ("sample",) for per-sample detection rates
+    detection_effects: tuple = ()     # subset of ("sample", "component")
     background_effects: tuple = ()    # ("sample",) for per-sample background rates
     verbose: int = 0
 
@@ -78,7 +63,9 @@ class ChainResult:
     draw_loglik: np.ndarray = None
     split_merge: np.ndarray = None    # (2, N_MOVES): attempts and acceptances per move type
     draw_sample_rates: dict = None    # "detection" / "background": (n_draws, n_samples) float32
-    draw_spread: np.ndarray = None    # (n_draws, 2) logit-scale spread of the sample rates
+    draw_slot_rates: list = None      # per draw (slots, detection rate per slot) or None
+    draw_spread: np.ndarray = None    # (n_draws, 3) logit-scale spreads: sample detection,
+    #                                   sample background, component detection
 
 
 def _csr(B):
@@ -133,31 +120,12 @@ def run_chain(V, cfg, seed, init):
     act_mask = free.copy()
 
     Z, U = initial_state(V, cfg, rng, init)
-    C = counts_from_state(Z, U)
-
-    a = cfg.prior_a.fixed if cfg.prior_a.fixed is not None else 0.9
-    b = cfg.prior_b.fixed if cfg.prior_b.fixed is not None else 0.05
+    engine = make_engine(cfg, V, Z, U, rng)
     ra, rb = cfg.membership_ab
     rho = np.clip(U.mean(0), 1e-4, 1 - 1e-4).astype(np.float64)
     pi = np.clip(Z.mean(0), 1e-6, 1 - 1e-6).astype(np.float64)
     pi[~free] = 1.0
     alpha = 1.0
-    lik = likelihood_code(cfg.likelihood)
-    det_s = SampleRates(n, a, cfg.prior_a) if "sample" in cfg.detection_effects else None
-    bg_s = SampleRates(n, b, cfg.prior_b) if "sample" in cfg.background_effects else None
-    per_sample = det_s is not None or bg_s is not None
-
-    def tables():
-        if not per_sample:                  # one row shared by every sample
-            T1, T0 = loglik_tables(cfg.likelihood, a, b, K)
-            return T1[None, :], T0[None, :]
-        return table_rows(cfg.likelihood, a_vec(), b_vec(), K)
-
-    def a_vec():
-        return det_s.rates if det_s is not None else np.full(n, a)
-
-    def b_vec():
-        return bg_s.rates if bg_s is not None else np.full(n, b)
 
     total_cap = cfg.max_sweeps
     trace = {m: [] for m in MONITORED}
@@ -172,6 +140,7 @@ def run_chain(V, cfg, seed, init):
     draws, d_rates, d_alpha, d_nact, d_ll = [], [], [], [], []
     d_srates = {"detection": [], "background": []}
     d_spread = []
+    d_slot_rates = []
     n_kept = 0
     sm_stats = np.zeros((2, N_MOVES), np.int64)
     sweep = 0
@@ -180,18 +149,15 @@ def run_chain(V, cfg, seed, init):
 
     while True:
         # ---- one Gibbs sweep ---------------------------------------------------------
-        T1, T0 = tables()
+        engine.begin_sweep(Z, U)
         act_ptr, act_idx = _csr(Z)
-        update_memberships(V, U, C, T1, T0, _logit(rho), act_ptr, act_idx, mem_mask,
-                           np.uint64(rng.integers(0, 2**63 - 1)))
+        engine.update_memberships(V, U, _logit(rho), act_ptr, act_idx, mem_mask, rng)
         nmem = U.sum(0, dtype=np.int64)
         phantom = free & (nmem == 0)
         if phantom.any():
             Z[:, phantom] = 0                      # memberless slots carry no carriers
         mem_ptr, mem_idx = _csr(U)
-        logit_pi = _logit(pi)
-        update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, act_mask,
-                           np.uint64(rng.integers(0, 2**63 - 1)))
+        engine.update_activations(V, Z, _logit(pi), mem_ptr, mem_idx, act_mask, rng)
         nact = Z.sum(0, dtype=np.int64)
         orphan = free & (nact == 0)
         if orphan.any():
@@ -202,8 +168,8 @@ def run_chain(V, cfg, seed, init):
             if phantom.any():
                 Z[:, phantom] = 0                  # so every free slot is used or empty
             zprior = (alpha / Kf, 1.0) if cfg.nonparametric else (1.0, 1.0)
-            split_merge_moves(V, Z, U, C, T1, T0, free, zprior, (ra, rb), cfg.n_split_merge,
-                              cfg.n_launch, rng, sm_stats)
+            engine.split_merge(V, Z, U, free, zprior, (ra, rb), cfg.n_split_merge,
+                               cfg.n_launch, rng, sm_stats)
             nmem = U.sum(0, dtype=np.int64)
             nact = Z.sum(0, dtype=np.int64)
 
@@ -218,12 +184,7 @@ def run_chain(V, cfg, seed, init):
         pi = np.ones(K)
         pi[free] = pi_f
 
-        if per_sample:
-            a, b, ll = _update_sample_rates(cfg, lik, V, C, K, a, b, det_s, bg_s, rng)
-        else:
-            H1, H0 = count_histograms(V, C, K)
-            a, b = update_rates(cfg.likelihood, a, b, H1, H0, cfg.prior_a, cfg.prior_b, rng)
-            ll = histogram_loglik(cfg.likelihood, a, b, H1, H0)
+        a, b, ll = engine.update_rates(V, Z, U, rng)
         n_active = int((free & (nmem >= cfg.min_support) & (nact >= cfg.min_support)).sum())
         trace["log_likelihood"].append(ll)
         trace["n_active"].append(n_active)
@@ -274,23 +235,26 @@ def run_chain(V, cfg, seed, init):
         Ubar += U
         Zbar += Z
         if cfg.store_entries:
-            T1c, _ = tables()
-            accumulate_entries(C, T1c, explained, predictive)
-        if det_s is not None:
-            d_srates["detection"].append(det_s.rates.astype(np.float32))
-        if bg_s is not None:
-            d_srates["background"].append(bg_s.rates.astype(np.float32))
-        if per_sample:
-            d_spread.append((det_s.sigma if det_s is not None else np.nan,
-                             bg_s.sigma if bg_s is not None else np.nan))
+            engine.accumulate(Z, U, explained, predictive)
+        extras, spread = engine.draw_extras()
+        for kind, v in extras.items():
+            d_srates[kind].append(v)
+        if spread is not None:
+            d_spread.append(spread)
         used = np.flatnonzero((nmem > 0) & (nact > 0) | ~free)
+        lam = engine.slot_rates(used)
+        if lam is not None:
+            d_slot_rates.append((used.astype(np.int32), lam.astype(np.float64)))
         if cfg.store_draws:
-            draws.append({
+            draw = {
                 "slots": used.astype(np.int32),
                 "U": np.packbits(U[:, used], axis=0),
                 "Z": np.packbits(Z[:, used], axis=0),
                 "pi": pi[used].astype(np.float64),
-            })
+            }
+            if lam is not None:
+                draw["lam"] = lam.astype(np.float64)
+            draws.append(draw)
         d_rates.append((a, b))
         d_alpha.append(alpha if cfg.nonparametric else np.nan)
         d_nact.append(n_active)
@@ -315,58 +279,10 @@ def run_chain(V, cfg, seed, init):
         split_merge=sm_stats,
         draw_sample_rates={k: np.asarray(v, np.float32) for k, v in d_srates.items() if v},
         draw_spread=np.asarray(d_spread, float) if d_spread else None,
+        draw_slot_rates=d_slot_rates or None,
     )
     if cfg.store_entries:
         res.explained = (explained.astype(np.float32) / n_kept)
         res.predictive = predictive / n_kept
     return res
 
-
-def _update_sample_rates(cfg, lik, V, C, K, a, b, det_s, bg_s, rng):
-    """Rate updates when at least one rate varies by sample; returns (a, b, log-likelihood).
-
-    a and b returned are the population rates (sigmoid of the mean logit) for per-sample rates
-    and the global rates otherwise. Under ``or_flip`` every sample keeps detection > background.
-    """
-    n = V.shape[0]
-    H1, H0 = row_histograms(V, C, K)
-    order = cfg.likelihood == "or_flip"
-    zeros, ones = np.zeros(n), np.ones(n)
-    bv = bg_s.rates if bg_s is not None else np.full(n, b)
-    if det_s is not None:
-        det_s.update(lik, 0, bv, H1, H0, bv if order else zeros, ones, rng)
-        av = det_s.rates
-        a = det_s.population_rate
-    elif cfg.prior_a.fixed is None:
-        lo = float(bv.max()) if order else 0.0
-        if order and cfg.prior_a.beta_ab:
-            aa, ab = cfg.prior_a.beta_ab
-            a = truncated_beta(rng, aa + H1[:, 1:].sum(), ab + H0[:, 1:].sum(), lo=lo)
-        else:
-            def la(x):
-                if x <= lo:
-                    return -np.inf
-                return rows_loglik(lik, np.full(n, x), bv, H1, H0) + cfg.prior_a.logpdf(x)
-
-            a = slice_sample_unit(la, max(a, lo + 1e-9), rng)
-        av = np.full(n, a)
-    else:
-        av = np.full(n, a)
-    if bg_s is not None:
-        bg_s.update(lik, 1, av, H1, H0, zeros, av if order else ones, rng)
-        bv = bg_s.rates
-        b = bg_s.population_rate
-    elif cfg.prior_b.fixed is None:
-        hi = float(av.min()) if order else 1.0
-        if order and cfg.prior_b.beta_ab:
-            ba, bb = cfg.prior_b.beta_ab
-            b = truncated_beta(rng, ba + H1[:, 0].sum(), bb + H0[:, 0].sum(), hi=hi)
-        else:
-            def lb(x):
-                if x >= hi:
-                    return -np.inf
-                return rows_loglik(lik, av, np.full(n, x), H1, H0) + cfg.prior_b.logpdf(x)
-
-            b = slice_sample_unit(lb, min(b, hi - 1e-9), rng)
-        bv = np.full(n, b)
-    return a, b, float(rows_loglik(lik, av, bv, H1, H0))

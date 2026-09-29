@@ -17,9 +17,11 @@ checks pass.
 
 ## v0.2: real data
 
-- Split–merge moves, so chains stop settling in different modes
-- Per-sample detection and background rates
-- Per-component rates (how completely each component's features show up in its carriers)
+- Split–merge moves, so chains stop settling in different modes (done)
+- Per-sample detection and background rates (done)
+- Per-component detection rates, with `likelihood="noisy_or"` (done)
+- The original samplers of the cited papers as options (for example Wood et al. 2006 births of
+  new components), each checked by reproducing the paper's published results
 - First real dataset: a subsample of a bacterial pangenome presence/absence matrix, compared with
   an NMF baseline; binarization at 0.5 against Bayesian FDR
 

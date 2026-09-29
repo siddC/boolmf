@@ -21,6 +21,13 @@ gives the probability of the reverse proposal. The target is the posterior with 
 probabilities pi and rho integrated out (Beta–Bernoulli), given the rates and alpha; the chain
 redraws pi and rho from their conditionals right after these moves, which keeps the joint
 posterior invariant.
+
+The block likelihood has two forms. ``mode = 0`` (count tables, both likelihoods with rates
+shared by components): the state is the count matrix C and an entry's log-likelihood is
+T[row, count]. ``mode = 1`` (log-survival, ``noisy_or`` with per-component rates): the state is
+L[i, j] = sum over covering components of log(1 - lambda_ik), each component adds S[i, k] =
+log(1 - lambda_ik), and log P(x = 0) = log(1 - background_i) + L. In both forms a block entry's
+value is ``base + za * sa + zb * sb`` with per-row increments sa, sb (1 for counts).
 """
 
 import math
@@ -43,19 +50,80 @@ def _log_beta_bernoulli(m, a, b, N):
 
 
 @njit(cache=True)
-def block_log_target(Vb, Cob, rows, za, zb, ua, ub, T1, T0, zpa, zpb, n, upa, upb, F):
-    """Log posterior (up to a constant shared by all allocations of the same union)."""
+def _entry_table_counts(Vb, base, rows, sa_r, sb_r, T1, T0):
     R, M = Vb.shape
     rs = 1 if T1.shape[0] > 1 else 0
-    s = 0.0
+    E = np.zeros((R, M, 4))
     for r in range(R):
+        g = rows[r] * rs
         for m in range(M):
             v = Vb[r, m]
             if v < 0:
                 continue
-            c = Cob[r, m] + za[r] * ua[m] + zb[r] * ub[m]
-            g = rows[r] * rs
-            s += T1[g, c] if v == 1 else T0[g, c]
+            x0 = base[r, m]
+            c0 = int(x0 + 0.5)
+            ca = int(x0 + sa_r[r] + 0.5)
+            cb = int(x0 + sb_r[r] + 0.5)
+            cab = int(x0 + sa_r[r] + sb_r[r] + 0.5)
+            if v == 1:
+                E[r, m, 0] = T1[g, c0]
+                E[r, m, 1] = T1[g, ca]
+                E[r, m, 2] = T1[g, cb]
+                E[r, m, 3] = T1[g, cab]
+            else:
+                E[r, m, 0] = T0[g, c0]
+                E[r, m, 1] = T0[g, ca]
+                E[r, m, 2] = T0[g, cb]
+                E[r, m, 3] = T0[g, cab]
+    return E
+
+
+@njit(inline="always")
+def _ls_ll(v, x):
+    """Log-likelihood of v given log P(x = 0) = x."""
+    if v == 1:
+        if x < -1e-12:
+            return math.log(-math.expm1(x))
+        return -27.631021115928547                # log(1e-12)
+    return x
+
+
+@njit(cache=True)
+def _entry_table_logsurv(Vb, base, rows, sa_r, sb_r, LB0):
+    R, M = Vb.shape
+    rsb = 1 if LB0.shape[0] > 1 else 0
+    E = np.zeros((R, M, 4))
+    for r in range(R):
+        lb = LB0[rows[r] * rsb]
+        for m in range(M):
+            v = Vb[r, m]
+            if v < 0:
+                continue
+            x0 = lb + base[r, m]
+            E[r, m, 0] = _ls_ll(v, x0)
+            E[r, m, 1] = _ls_ll(v, x0 + sa_r[r])
+            E[r, m, 2] = _ls_ll(v, x0 + sb_r[r])
+            E[r, m, 3] = _ls_ll(v, x0 + sa_r[r] + sb_r[r])
+    return E
+
+
+@njit(cache=True)
+def block_entry_table(mode, Vb, base, rows, sa_r, sb_r, T1, T0, LB0):
+    """E[r, m, c]: log-likelihood of block entry (r, m) when it is covered by slot a (bit 0 of
+    c) and/or slot b (bit 1), everything else fixed; 0 for missing entries."""
+    if mode == 0:
+        return _entry_table_counts(Vb, base, rows, sa_r, sb_r, T1, T0)
+    return _entry_table_logsurv(Vb, base, rows, sa_r, sb_r, LB0)
+
+
+@njit(cache=True)
+def block_log_target(E, za, zb, ua, ub, zpa, zpb, n, upa, upb, F):
+    """Log posterior (up to a constant shared by all allocations of the same union)."""
+    R, M = E.shape[0], E.shape[1]
+    s = 0.0
+    for r in range(R):
+        for m in range(M):
+            s += E[r, m, za[r] * ua[m] + 2 * zb[r] * ub[m]]
     ma = 0
     mb = 0
     for r in range(R):
@@ -95,16 +163,15 @@ def _option(a, b):
 
 
 @njit(cache=True)
-def restricted_scan(Vb, Cob, rows, za, zb, ua, ub, T1, T0, zpa, zpb, n, upa, upb, F,
-                    order_r, order_m, state, use_target, tza, tzb, tua, tub):
+def restricted_scan(E, za, zb, ua, ub, zpa, zpb, n, upa, upb, F, order_r, order_m, state,
+                    use_target, tza, tzb, tua, tub):
     """One restricted Gibbs scan over the union: columns in ``order_m``, then rows in ``order_r``.
 
     Each element is redrawn from its conditional among (1, 0), (0, 1), (1, 1), or, with
     ``use_target``, set to the target's value. Updates za, zb, ua, ub in place and returns
-    (state, log probability of the choices made).
+    (state, log probability of the choices made). E is ``block_entry_table``.
     """
-    R, M = Vb.shape
-    rs = 1 if T1.shape[0] > 1 else 0
+    R, M = E.shape[0], E.shape[1]
     logq = 0.0
     sa = 0
     sb = 0
@@ -128,22 +195,11 @@ def restricted_scan(Vb, Cob, rows, za, zb, ua, ub, T1, T0, zpa, zpb, n, upa, upb
         w1 = la0 + lb1
         w2 = la1 + lb1
         for r in range(R):
-            v = Vb[r, m]
-            if v < 0:
-                continue
-            c = Cob[r, m]
-            c0 = c + za[r]
-            c1 = c + zb[r]
-            c2 = c0 + zb[r]
-            g = rows[r] * rs
-            if v == 1:
-                w0 += T1[g, c0]
-                w1 += T1[g, c1]
-                w2 += T1[g, c2]
-            else:
-                w0 += T0[g, c0]
-                w1 += T0[g, c1]
-                w2 += T0[g, c2]
+            ia = za[r]
+            ib = 2 * zb[r]
+            w0 += E[r, m, ia]
+            w1 += E[r, m, ib]
+            w2 += E[r, m, ia + ib]
         o, lp, state = _pick(w0, w1, w2, _option(tua[m], tub[m]), state, use_target)
         logq += lp
         ua[m] = 1 if o != 1 else 0
@@ -162,22 +218,11 @@ def restricted_scan(Vb, Cob, rows, za, zb, ua, ub, T1, T0, zpa, zpb, n, upa, upb
         w1 = la0 + lb1
         w2 = la1 + lb1
         for m in range(M):
-            v = Vb[r, m]
-            if v < 0:
-                continue
-            c = Cob[r, m]
-            c0 = c + ua[m]
-            c1 = c + ub[m]
-            c2 = c0 + ub[m]
-            g = rows[r] * rs
-            if v == 1:
-                w0 += T1[g, c0]
-                w1 += T1[g, c1]
-                w2 += T1[g, c2]
-            else:
-                w0 += T0[g, c0]
-                w1 += T0[g, c1]
-                w2 += T0[g, c2]
+            ia = ua[m]
+            ib = 2 * ub[m]
+            w0 += E[r, m, ia]
+            w1 += E[r, m, ib]
+            w2 += E[r, m, ia + ib]
         o, lp, state = _pick(w0, w1, w2, _option(tza[r], tzb[r]), state, use_target)
         logq += lp
         za[r] = 1 if o != 1 else 0
@@ -290,9 +335,9 @@ def _count(x):
 
 
 @njit(cache=True)
-def split_merge_kernel(V, Z, U, C, T1, T0, free_idx, zpa, zpb, upa, upb, n_attempts, n_launch,
-                       seed, stats):
-    """``n_attempts`` split / merge / reallocate proposals on the free slots, in place.
+def split_merge_kernel(mode, V, Z, U, STATE, T1, T0, S, LB0, free_idx, zpa, zpb, upa, upb,
+                       n_attempts, n_launch, seed, stats):
+    """``n_attempts`` proposals on the free slots, in place (STATE = C or L, see module doc).
 
     Move selection: the first slot is uniform over used slots; a merge or reallocation partner
     is drawn with weight proportional to its similarity to the first slot (``_partner_weights``);
@@ -374,12 +419,21 @@ def split_merge_kernel(V, Z, U, C, T1, T0, free_idx, zpa, zpb, upa, upb, n_attem
         for m in range(M):
             ua0[m] = U[cols[m], k1]
             ub0[m] = U[cols[m], k2]
+        sa_r = np.ones(R)
+        sb_r = np.ones(R)
+        if mode == 1:
+            rss = 1 if S.shape[0] > 1 else 0
+            for r in range(R):
+                sa_r[r] = S[rows[r] * rss, k1]
+                sb_r[r] = S[rows[r] * rss, k2]
         Vb = np.empty((R, M), np.int8)
-        Cob = np.empty((R, M), np.int64)
+        base = np.empty((R, M))
         for r in range(R):
             for m in range(M):
                 Vb[r, m] = V[rows[r], cols[m]]
-                Cob[r, m] = C[rows[r], cols[m]] - za0[r] * ua0[m] - zb0[r] * ub0[m]
+                base[r, m] = (STATE[rows[r], cols[m]] - za0[r] * ua0[m] * sa_r[r]
+                              - zb0[r] * ub0[m] * sb_r[r])
+        E = block_entry_table(mode, Vb, base, rows, sa_r, sb_r, T1, T0, LB0)
 
         if move >= FACTOR:
             # Rewrites that keep which entries are covered. Two shapes of a pair (a, b):
@@ -467,17 +521,16 @@ def split_merge_kernel(V, Z, U, C, T1, T0, free_idx, zpa, zpb, upa, upb, n_attem
             for _s in range(n_launch):
                 state, pr = _permutation(state, R)
                 state, pm = _permutation(state, M)
-                state, _lq = restricted_scan(Vb, Cob, rows, za, zb, ua, ub, T1, T0, zpa, zpb,
-                                             n, upa, upb, F, pr, pm, state, False,
-                                             za0, zb0, ua0, ub0)
+                state, _lq = restricted_scan(E, za, zb, ua, ub, zpa, zpb, n, upa, upb, F, pr,
+                                             pm, state, False, za0, zb0, ua0, ub0)
             state, order_r = _permutation(state, R)
             state, order_m = _permutation(state, M)
 
             # ---- proposal and the probability of the reverse proposal -------------------------
             if move == MERGE:
-                _st, logq_rev = restricted_scan(Vb, Cob, rows, za, zb, ua, ub, T1, T0, zpa,
-                                                zpb, n, upa, upb, F, order_r, order_m, state,
-                                                True, za0, zb0, ua0, ub0)
+                _st, logq_rev = restricted_scan(E, za, zb, ua, ub, zpa, zpb, n, upa, upb, F,
+                                                order_r, order_m, state, True,
+                                                za0, zb0, ua0, ub0)
                 za1 = np.ones(R, np.int8)
                 zb1 = np.zeros(R, np.int8)
                 ua1 = np.ones(M, np.int8)
@@ -488,17 +541,17 @@ def split_merge_kernel(V, Z, U, C, T1, T0, free_idx, zpa, zpb, upa, upb, n_attem
                 zb1 = zb.copy()
                 ua1 = ua.copy()
                 ub1 = ub.copy()
-                state, logq_fwd = restricted_scan(Vb, Cob, rows, za1, zb1, ua1, ub1, T1, T0,
-                                                  zpa, zpb, n, upa, upb, F, order_r, order_m,
-                                                  state, False, za0, zb0, ua0, ub0)
+                state, logq_fwd = restricted_scan(E, za1, zb1, ua1, ub1, zpa, zpb, n, upa,
+                                                  upb, F, order_r, order_m, state, False,
+                                                  za0, zb0, ua0, ub0)
                 if not (_any(za1) and _any(zb1) and _any(ua1) and _any(ub1)):
                     continue                       # one slot would be left empty: reject
                 if move == SPLIT:
                     log_q = -logq_fwd
                 else:
-                    _st, logq_rev = restricted_scan(Vb, Cob, rows, za, zb, ua, ub, T1, T0, zpa,
-                                                    zpb, n, upa, upb, F, order_r, order_m, state,
-                                                    True, za0, zb0, ua0, ub0)
+                    _st, logq_rev = restricted_scan(E, za, zb, ua, ub, zpa, zpb, n, upa, upb, F,
+                                                    order_r, order_m, state, True,
+                                                    za0, zb0, ua0, ub0)
                     log_q = logq_rev - logq_fwd
 
         # write the proposal; the reverse selection probability is computed in that state
@@ -517,16 +570,18 @@ def split_merge_kernel(V, Z, U, C, T1, T0, free_idx, zpa, zpb, upa, upb, n_attem
             Nu2, _Ne2 = _slot_lists(nz, nu, used, empty)
             log_sel_rev = (-log_moves - math.log(Nu2)
                            + _log_partner_prob(Z, U, free_idx, nz, nu, used, Nu2, t1, t2))
-        log_r = (block_log_target(Vb, Cob, rows, za1, zb1, ua1, ub1, T1, T0, zpa, zpb, n, upa,
-                                  upb, F)
-                 - block_log_target(Vb, Cob, rows, za0, zb0, ua0, ub0, T1, T0, zpa, zpb, n, upa,
-                                    upb, F)
+        log_r = (block_log_target(E, za1, zb1, ua1, ub1, zpa, zpb, n, upa, upb, F)
+                 - block_log_target(E, za0, zb0, ua0, ub0, zpa, zpb, n, upa, upb, F)
                  + log_sel_rev - log_sel_fwd + log_q)
         state, u = _next_uniform(state)
         if log_r >= 0.0 or u < math.exp(log_r):
             for r in range(R):
                 for m in range(M):
-                    C[rows[r], cols[m]] = Cob[r, m] + za1[r] * ua1[m] + zb1[r] * ub1[m]
+                    val = base[r, m] + za1[r] * ua1[m] * sa_r[r] + zb1[r] * ub1[m] * sb_r[r]
+                    if mode == 0:
+                        STATE[rows[r], cols[m]] = int(val + 0.5)
+                    else:
+                        STATE[rows[r], cols[m]] = val
             stats[1, move] += 1
         else:
             _write(Z, U, rows, cols, k1, k2, za0, zb0, ua0, ub0)
@@ -540,19 +595,36 @@ def split_merge_moves(V, Z, U, C, T1, T0, free, zprior, uprior, n_attempts, n_la
                       stats=None):
     """Attempt ``n_attempts`` split, merge, reallocate, factor or unfactor moves, in place.
 
-    T1, T0 are the likelihood tables: one row per sample, or one row (or a 1-D table) shared by
-    all samples when the rates are global.
-
-    zprior = (a, b) of the Beta prior on activation probabilities (alpha / K and 1 under the
-    Indian buffet process); uprior = (a, b) of the Beta prior on membership probabilities.
-    ``stats`` (optional, int64 array of shape (2, N_MOVES)) accumulates attempts and
-    acceptances per move type, in the order of ``MOVE_NAMES``.
+    Count form: C holds the counts, T1, T0 the likelihood tables, one row per sample or one row
+    (or a 1-D table) shared by all samples. zprior = (a, b) of the Beta prior on activation
+    probabilities (alpha / K and 1 under the Indian buffet process); uprior = (a, b) of the Beta
+    prior on membership probabilities. ``stats`` (optional, int64 array of shape (2, N_MOVES))
+    accumulates attempts and acceptances per move type, in the order of ``MOVE_NAMES``.
     """
+    if T1.ndim == 1:
+        T1, T0 = T1[None, :], T0[None, :]
+    _run(0, V, Z, U, C, T1, T0, _DUMMY2, _DUMMY1, free, zprior, uprior, n_attempts, n_launch,
+         rng, stats)
+
+
+def split_merge_moves_logsurv(V, Z, U, L, S, LB0, free, zprior, uprior, n_attempts, n_launch,
+                              rng, stats=None):
+    """Log-survival form (``noisy_or`` with per-component rates): L[i, j] = sum over covering
+    components of S[i, k] = log(1 - lambda_ik); LB0 = log(1 - background), one entry per sample
+    or one shared. S has one row per sample or one shared row."""
+    _run(1, V, Z, U, L, _DUMMY2, _DUMMY2, S, LB0, free, zprior, uprior, n_attempts, n_launch,
+         rng, stats)
+
+
+_DUMMY1 = np.zeros(1)
+_DUMMY2 = np.zeros((1, 1))
+
+
+def _run(mode, V, Z, U, STATE, T1, T0, S, LB0, free, zprior, uprior, n_attempts, n_launch, rng,
+         stats):
     if stats is None:
         stats = np.zeros((2, N_MOVES), np.int64)
-    if T1.ndim == 1:                          # global rates: one row shared by all samples
-        T1, T0 = T1[None, :], T0[None, :]
-    split_merge_kernel(V, Z, U, C, T1, T0, np.flatnonzero(free).astype(np.int64),
-                       float(zprior[0]), float(zprior[1]), float(uprior[0]), float(uprior[1]),
-                       int(n_attempts), int(n_launch), np.uint64(rng.integers(0, 2**63 - 1)),
-                       stats)
+    split_merge_kernel(mode, V, Z, U, STATE, T1, T0, S, np.ascontiguousarray(LB0, float),
+                       np.flatnonzero(free).astype(np.int64), float(zprior[0]),
+                       float(zprior[1]), float(uprior[0]), float(uprior[1]), int(n_attempts),
+                       int(n_launch), np.uint64(rng.integers(0, 2**63 - 1)), stats)
