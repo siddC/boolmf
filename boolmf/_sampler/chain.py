@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 import numba
 import numpy as np
 
+from .._model import loglik_tables
 from ..diagnostics import ess, geweke, segment_rhat
+from .collapsed import BIRTH_ENUMERATE, BIRTH_METROPOLIS, collapsed_rows
 from .engines import make_engine
 from .splitmerge import N_MOVES
 
@@ -47,6 +49,9 @@ class ChainConfig:
     metropolis: bool = False          # Metropolised Gibbs flips (Liu 1996) instead of Gibbs draws
     activations_first: bool = False   # update Z before U in each sweep
     init_kind: str = "random"         # "random", "uniform" or "empty" when no init tuple is given
+    births: str = "slots"             # "slots", "enumerate" (Wood 2006), "metropolis" (Meeds)
+    max_new: int = 10                 # most new components one row may add at once
+    exact_birth_members: bool = True  # False: one Gibbs pass from 0 over new memberships
     detection_effects: tuple = ()     # subset of ("sample", "component")
     background_effects: tuple = ()    # ("sample",) for per-sample background rates
     verbose: int = 0
@@ -69,6 +74,7 @@ class ChainResult:
     draw_n_active: np.ndarray = None
     draw_loglik: np.ndarray = None
     split_merge: np.ndarray = None    # (2, N_MOVES): attempts and acceptances per move type
+    births: np.ndarray = None         # collapsed sampler: births, deaths, truncation hits
     draw_sample_rates: dict = None    # "detection" / "background": (n_draws, n_samples) float32
     draw_slot_rates: list = None      # per draw (slots, detection rate per slot) or None
     draw_spread: np.ndarray = None    # (n_draws, 3) logit-scale spreads: sample detection,
@@ -176,6 +182,8 @@ def run_chain(V, cfg, seed, init):
         pi[:, free] = apri.value
     if mpri.kind == "fixed":
         rho = np.full((1, K), mpri.value)
+    elif cfg.births != "slots":
+        rho = np.full((1, K), mpri.a / (mpri.a + mpri.b))
     alpha = cfg.alpha_prior.fixed if cfg.alpha_prior.fixed is not None else 1.0
 
     total_cap = cfg.max_sweeps
@@ -194,6 +202,8 @@ def run_chain(V, cfg, seed, init):
     d_slot_rates = []
     n_kept = 0
     sm_stats = np.zeros((2, N_MOVES), np.int64)
+    birth_stats = np.zeros(3, np.int64)
+    harmonic = float(np.sum(1.0 / np.arange(1, n + 1)))
     sweep = 0
     sampling_start = None
     passes = 0
@@ -201,7 +211,12 @@ def run_chain(V, cfg, seed, init):
     while True:
         # ---- one Gibbs sweep ---------------------------------------------------------
         engine.begin_sweep(Z, U)
-        if cfg.activations_first:
+        if cfg.births != "slots":
+            alpha, rho, pi = _collapsed_sweep(cfg, V, Z, U, engine, alpha, rho, mpri, harmonic,
+                                              birth_stats, rng)
+            nmem = U.sum(0, dtype=np.int64)
+            nact = Z.sum(0, dtype=np.int64)
+        elif cfg.activations_first:
             mem_ptr, mem_idx = _csr(U)
             engine.update_activations(V, Z, _logit(pi), mem_ptr, mem_idx, act_mask, rng,
                                       cfg.metropolis)
@@ -224,7 +239,7 @@ def run_chain(V, cfg, seed, init):
         if orphan.any() and cfg.nonparametric:
             U[:, orphan] = 0                       # carrier-less slots keep no members
         nmem = U.sum(0, dtype=np.int64)
-        if cfg.n_split_merge > 0:
+        if cfg.births == "slots" and cfg.n_split_merge > 0:
             phantom = free & (nmem == 0)
             if phantom.any():
                 Z[:, phantom] = 0                  # so every free slot is used or empty
@@ -235,7 +250,9 @@ def run_chain(V, cfg, seed, init):
             nmem = U.sum(0, dtype=np.int64)
             nact = Z.sum(0, dtype=np.int64)
 
-        if mpri.kind != "fixed":
+        if cfg.births != "slots":
+            pass                                  # updated inside the collapsed sweep
+        elif mpri.kind != "fixed":
             if mpri.level == "component":
                 rho = rng.beta(ra + nmem, rb + F - nmem).astype(np.float64)[None, :]
             else:                               # shared or per feature, over the used slots
@@ -243,7 +260,9 @@ def run_chain(V, cfg, seed, init):
                     if cfg.nonparametric else np.arange(K)
                 rho = np.broadcast_to(_level_rates(mpri, U, cols, rng, F),
                                       (F if mpri.level == "row" else 1, K)).copy()
-        if cfg.nonparametric:
+        if cfg.births != "slots":
+            pass
+        elif cfg.nonparametric:
             pi_f = rng.beta(alpha / Kf + nact[free], 1.0 + n - nact[free])
             pi_f = np.clip(pi_f, 1e-300, 1 - 1e-12)
             if cfg.alpha_prior.fixed is None:
@@ -324,6 +343,7 @@ def run_chain(V, cfg, seed, init):
                 "U": np.packbits(U[:, used], axis=0),
                 "Z": np.packbits(Z[:, used], axis=0),
                 "pi": pi.mean(0)[used].astype(np.float64),
+                "rho": np.broadcast_to(rho, (rho.shape[0], K)).mean(0)[used].astype(np.float64),
             }
             if lam is not None:
                 draw["lam"] = lam.astype(np.float64)
@@ -350,6 +370,7 @@ def run_chain(V, cfg, seed, init):
         draw_n_active=np.asarray(d_nact, int),
         draw_loglik=np.asarray(d_ll, float),
         split_merge=sm_stats,
+        births=birth_stats,
         draw_sample_rates={k: np.asarray(v, np.float32) for k, v in d_srates.items() if v},
         draw_spread=np.asarray(d_spread, float) if d_spread else None,
         draw_slot_rates=d_slot_rates or None,
@@ -359,3 +380,35 @@ def run_chain(V, cfg, seed, init):
         res.predictive = predictive / n_kept
     return res
 
+
+
+def _collapsed_sweep(cfg, V, Z, U, engine, alpha, rho, mpri, harmonic, stats, rng):
+    """One sweep of the collapsed IBP sampler (``births`` "enumerate" or "metropolis").
+
+    Rows of Z are updated in turn with births (``collapsed.collapsed_rows``), then U by the
+    parallel Gibbs kernel with the shared membership probability p, then p (when it has a Beta
+    prior) and alpha (when not fixed). Returns (alpha, rho, pi) for the chain's bookkeeping.
+    """
+    n, F = V.shape
+    K = Z.shape[1]
+    p = float(rho.flat[0])
+    T1, T0 = loglik_tables(cfg.likelihood, engine.a, engine.b, K + cfg.max_new + 1)
+    births = BIRTH_ENUMERATE if cfg.births == "enumerate" else BIRTH_METROPOLIS
+    collapsed_rows(V, Z, U, engine.C, T1, T0, float(alpha), p, births, cfg.max_new,
+                   cfg.metropolis, np.uint64(rng.integers(0, 2**63 - 1)), stats,
+                   cfg.exact_birth_members)
+    used = Z.sum(0) > 0
+    U[:, ~used] = 0
+    act_ptr, act_idx = _csr(Z)
+    engine.update_memberships(V, U, np.full((1, K), _logit(np.array([p]))[0]), act_ptr, act_idx,
+                              used, rng, cfg.metropolis)
+    k_plus = int(used.sum())
+    if mpri.kind != "fixed":
+        ones = int(U[:, used].sum())
+        p = float(rng.beta(mpri.a + ones, mpri.b + F * k_plus - ones))
+    if cfg.alpha_prior.fixed is None:
+        alpha = float(rng.gamma(cfg.alpha_prior.shape + k_plus,
+                                1.0 / (cfg.alpha_prior.rate + harmonic)))
+    m = Z.sum(0).astype(float)
+    pi = np.clip(m / n, 1e-12, 1 - 1e-12)[None, :]
+    return alpha, np.full((1, K), p), pi
