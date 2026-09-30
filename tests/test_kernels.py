@@ -66,7 +66,8 @@ def test_activation_kernel_matches_reference():
     seed = 123456789
     Z1, C1 = Z.copy(), C.copy()
     ptr, idx = _csr(U)
-    update_activations(V, Z1, C1, T1, T0, logit_pi, ptr, idx, np.ones(K, bool), np.uint64(seed))
+    update_activations(V, Z1, C1, T1, T0, logit_pi[None, :], ptr, idx, np.ones(K, bool),
+                       np.uint64(seed))
     Z2, C2 = Z.copy(), C.copy().astype(np.int64)
     _ref_update_activations(V, Z2, C2, T1, T0, logit_pi, seed)
     np.testing.assert_array_equal(Z1, Z2)
@@ -84,7 +85,7 @@ def test_membership_kernel_keeps_counts_consistent():
     T1, T0 = loglik_tables("or_flip", 0.9, 0.05, K)
     T1, T0 = np.tile(T1, (n, 1)), np.tile(T0, (n, 1))
     ptr, idx = _csr(Z)
-    update_memberships(V, U, C, T1, T0, rng.normal(size=K), ptr, idx, np.ones(K, bool),
+    update_memberships(V, U, C, T1, T0, rng.normal(size=(1, K)), ptr, idx, np.ones(K, bool),
                        np.uint64(7))
     np.testing.assert_array_equal(C, counts_from_state(Z, U))
 
@@ -115,7 +116,7 @@ def test_log_survival_kernels_match_reference_and_keep_L_consistent():
     # reference activation update (same random stream)
     Z1, L1 = Z.copy(), L_of(Z, U)
     ptr, idx = _csr(U)
-    update_activations_ls(V, Z1, L1, LB0, S, logit_pi, ptr, idx, np.ones(K, bool),
+    update_activations_ls(V, Z1, L1, LB0, S, logit_pi[None, :], ptr, idx, np.ones(K, bool),
                           np.uint64(seed))
     Z2, L2 = Z.copy(), L_of(Z, U)
     for i in range(n):
@@ -140,6 +141,6 @@ def test_log_survival_kernels_match_reference_and_keep_L_consistent():
 
     # membership update keeps L consistent
     act_ptr, act_idx = _csr(Z1)
-    update_memberships_ls(V, U, L1, LB0, S, rng.normal(size=K), act_ptr, act_idx,
+    update_memberships_ls(V, U, L1, LB0, S, rng.normal(size=(1, K)), act_ptr, act_idx,
                           np.ones(K, bool), np.uint64(7))
     np.testing.assert_allclose(L1, L_of(Z1, U), atol=1e-12)

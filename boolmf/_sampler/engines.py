@@ -86,6 +86,33 @@ def _update_center(values, sigma, prior, current, rng):
     return float(np.log(p) - np.log1p(-p))
 
 
+def _tied_rate(H1, H0, prior_a, estimation, rng):
+    """``or_flip`` with background = 1 - detection (the OrMachine's symmetric flip noise).
+
+    An entry is reconstructed correctly when it is present and covered or absent and not
+    covered; the detection rate is the probability of that. ``mle`` returns the fraction
+    correct (Rukat et al. 2017, Eq. 5); ``bayes`` draws from Beta(prior + counts). Both stay
+    at or above 1/2, where the flip noise keeps its meaning.
+    """
+    if prior_a.fixed is not None:
+        return prior_a.fixed
+    correct = H1[1:].sum() + H0[0]
+    wrong = H0[1:].sum() + H1[0]
+    if estimation == "mle":
+        return float(np.clip(correct / max(correct + wrong, 1), 0.5, 1.0 - 1e-12))
+    aa, ab = prior_a.beta_ab or (1.0, 1.0)
+    return truncated_beta(rng, aa + correct, ab + wrong, lo=0.5)
+
+
+def _mle_rates(H1, H0, prior_a, prior_b):
+    """``or_flip`` maximum-likelihood rates: the present fraction among covered entries and
+    among uncovered entries (fixed rates stay fixed)."""
+    n11, n01, n10, n00 = H1[1:].sum(), H0[1:].sum(), H1[0], H0[0]
+    a = prior_a.fixed if prior_a.fixed is not None else n11 / max(n11 + n01, 1)
+    b = prior_b.fixed if prior_b.fixed is not None else n10 / max(n10 + n00, 1)
+    return float(np.clip(a, 1e-12, 1 - 1e-12)), float(np.clip(b, 1e-12, 1 - 1e-12))
+
+
 class CountEngine:
     """Rates shared by all components (global, or per sample through ``SampleRates``)."""
 
@@ -95,6 +122,8 @@ class CountEngine:
         self.lik = likelihood_code(cfg.likelihood)
         self.a = cfg.prior_a.fixed if cfg.prior_a.fixed is not None else 0.9
         self.b = cfg.prior_b.fixed if cfg.prior_b.fixed is not None else 0.05
+        if cfg.tied_rates:
+            self.b = 1.0 - self.a
         self.det_s = SampleRates(n, self.a, cfg.prior_a) \
             if "sample" in cfg.detection_effects else None
         self.bg_s = SampleRates(n, self.b, cfg.prior_b) \
@@ -120,13 +149,14 @@ class CountEngine:
     def begin_sweep(self, Z, U):
         self.T1, self.T0 = self.tables()
 
-    def update_memberships(self, V, U, logit_rho, act_ptr, act_idx, mask, rng):
+    def update_memberships(self, V, U, logit_rho, act_ptr, act_idx, mask, rng,
+                           metropolis=False):
         update_memberships(V, U, self.C, self.T1, self.T0, logit_rho, act_ptr, act_idx, mask,
-                           _seed(rng))
+                           _seed(rng), metropolis)
 
-    def update_activations(self, V, Z, logit_pi, mem_ptr, mem_idx, mask, rng):
+    def update_activations(self, V, Z, logit_pi, mem_ptr, mem_idx, mask, rng, metropolis=False):
         update_activations(V, Z, self.C, self.T1, self.T0, logit_pi, mem_ptr, mem_idx, mask,
-                           _seed(rng))
+                           _seed(rng), metropolis)
 
     def split_merge(self, V, Z, U, free, zprior, uprior, n_attempts, n_launch, rng, stats):
         split_merge_moves(V, Z, U, self.C, self.T1, self.T0, free, zprior, uprior, n_attempts,
@@ -137,8 +167,14 @@ class CountEngine:
         cfg = self.cfg
         if not self.per_sample:
             H1, H0 = count_histograms(V, self.C, self.K)
-            self.a, self.b = update_rates(cfg.likelihood, self.a, self.b, H1, H0, cfg.prior_a,
-                                          cfg.prior_b, rng)
+            if cfg.tied_rates:
+                self.a = _tied_rate(H1, H0, cfg.prior_a, cfg.rate_estimation, rng)
+                self.b = 1.0 - self.a
+            elif cfg.rate_estimation == "mle":
+                self.a, self.b = _mle_rates(H1, H0, cfg.prior_a, cfg.prior_b)
+            else:
+                self.a, self.b = update_rates(cfg.likelihood, self.a, self.b, H1, H0,
+                                              cfg.prior_a, cfg.prior_b, rng)
             return self.a, self.b, histogram_loglik(cfg.likelihood, self.a, self.b, H1, H0)
         n, lik = self.n, self.lik
         H1, H0 = row_histograms(V, self.C, self.K)
@@ -245,13 +281,14 @@ class LogSurvEngine:
         mem_ptr, mem_idx = _csr(U)
         self.L = logsurv_from_state(Z, self.S, mem_ptr, mem_idx, self.F)
 
-    def update_memberships(self, V, U, logit_rho, act_ptr, act_idx, mask, rng):
+    def update_memberships(self, V, U, logit_rho, act_ptr, act_idx, mask, rng,
+                           metropolis=False):
         update_memberships_ls(V, U, self.L, self.LB0, self.S, logit_rho, act_ptr, act_idx, mask,
-                              _seed(rng))
+                              _seed(rng), metropolis)
 
-    def update_activations(self, V, Z, logit_pi, mem_ptr, mem_idx, mask, rng):
+    def update_activations(self, V, Z, logit_pi, mem_ptr, mem_idx, mask, rng, metropolis=False):
         update_activations_ls(V, Z, self.L, self.LB0, self.S, logit_pi, mem_ptr, mem_idx, mask,
-                              _seed(rng))
+                              _seed(rng), metropolis)
 
     def split_merge(self, V, Z, U, free, zprior, uprior, n_attempts, n_launch, rng, stats):
         split_merge_moves_logsurv(V, Z, U, self.L, self.S, self.LB0, free, zprior, uprior,

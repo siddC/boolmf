@@ -19,7 +19,7 @@ import math
 import numpy as np
 from numba import njit, prange
 
-from .kernels import _next_uniform, _row_state
+from .kernels import _decide, _next_uniform, _row_state
 
 LOG_EPS = math.log(1e-12)
 
@@ -68,17 +68,19 @@ def logsurv_from_state(Z, S, mem_ptr, mem_idx, F):
 
 
 @njit(parallel=True, cache=True)
-def update_memberships_ls(V, U, L, LB0, S, logit_rho, act_ptr, act_idx, update_mask, seed):
+def update_memberships_ls(V, U, L, LB0, S, logit_rho, act_ptr, act_idx, update_mask, seed,
+                          metropolis=False):
     """Gibbs update of U[j, k] for every feature j (in parallel) and component k."""
     F, K = U.shape
     rs = 1 if S.shape[0] > 1 else 0
     rb = 1 if LB0.shape[0] > 1 else 0
+    pr = 1 if logit_rho.shape[0] > 1 else 0
     for j in prange(F):
         state = _row_state(seed, j)
         for k in range(K):
             if not update_mask[k]:
                 continue
-            lo = logit_rho[k]
+            lo = logit_rho[j * pr, k]
             old = U[j, k]
             for t in range(act_ptr[k], act_ptr[k + 1]):
                 i = act_idx[t]
@@ -89,8 +91,7 @@ def update_memberships_ls(V, U, L, LB0, S, logit_rho, act_ptr, act_idx, update_m
                 Lm = L[i, j] - old * s
                 lb = LB0[i * rb]
                 lo += entry_ll(v, lb, Lm + s) - entry_ll(v, lb, Lm)
-            state, u = _next_uniform(state)
-            new = np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0)
+            state, new = _decide(state, lo, old, metropolis)
             if new != old:
                 d = new - old
                 for t in range(act_ptr[k], act_ptr[k + 1]):
@@ -100,18 +101,20 @@ def update_memberships_ls(V, U, L, LB0, S, logit_rho, act_ptr, act_idx, update_m
 
 
 @njit(parallel=True, cache=True)
-def update_activations_ls(V, Z, L, LB0, S, logit_pi, mem_ptr, mem_idx, update_mask, seed):
+def update_activations_ls(V, Z, L, LB0, S, logit_pi, mem_ptr, mem_idx, update_mask, seed,
+                          metropolis=False):
     """Gibbs update of Z[i, k] for every sample i (in parallel) and component k."""
     n, K = Z.shape
     rs = 1 if S.shape[0] > 1 else 0
     rb = 1 if LB0.shape[0] > 1 else 0
+    pz = 1 if logit_pi.shape[0] > 1 else 0
     for i in prange(n):
         state = _row_state(seed, i)
         lb = LB0[i * rb]
         for k in range(K):
             if not update_mask[k]:
                 continue
-            lo = logit_pi[k]
+            lo = logit_pi[i * pz, k]
             old = Z[i, k]
             s = S[i * rs, k]
             for t in range(mem_ptr[k], mem_ptr[k + 1]):
@@ -121,8 +124,7 @@ def update_activations_ls(V, Z, L, LB0, S, logit_pi, mem_ptr, mem_idx, update_ma
                     continue
                 Lm = L[i, j] - old * s
                 lo += entry_ll(v, lb, Lm + s) - entry_ll(v, lb, Lm)
-            state, u = _next_uniform(state)
-            new = np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0)
+            state, new = _decide(state, lo, old, metropolis)
             if new != old:
                 d = new - old
                 for t in range(mem_ptr[k], mem_ptr[k + 1]):
