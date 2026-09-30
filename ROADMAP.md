@@ -20,8 +20,9 @@ checks pass.
 - Split–merge moves, so chains stop settling in different modes (done)
 - Per-sample detection and background rates (done)
 - Per-component detection rates, with `likelihood="noisy_or"` (done)
-- The original samplers of the cited papers as options (for example Wood et al. 2006 births of
-  new components), each checked by reproducing the paper's published results
+- The original samplers of the cited papers as options, each checked by reproducing the
+  paper's published results: Rukat et al. 2017 (done), Wood et al. 2006, Meeds et al. 2007
+  births and Rukat & Yau 2019 (done), Wagala et al. 2026
 - First real dataset: a subsample of a bacterial pangenome presence/absence matrix, compared with
   an NMF baseline; binarization at 0.5 against Bayesian FDR
 

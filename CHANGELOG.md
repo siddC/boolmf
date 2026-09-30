@@ -56,6 +56,31 @@
 - `presets.rukat2017`, the OrMachine (Rukat et al. 2017). `benchmarks/papers/rukat2017.py`
   reproduces Section 4.1: all 17 points read from Fig. 4 are within 0.03 of the published
   reconstruction errors; a fast version runs in the test suite.
+- Collapsed Indian buffet process samplers, `births="enumerate"` (Wood, Griffiths & Ghahramani
+  2006: each row keeps an existing component with prior m / N, then draws its number of new
+  components, up to `max_births`, from the exact conditional with their other side summed out)
+  and `births="metropolis"` (Meeds et al. 2007: a Poisson(alpha / N) number of new components,
+  drawn from the prior, replaces the row's own ones with Metropolis–Hastings acceptance).
+  `birth_members="gibbs"` sets the new components' other side by one Gibbs pass from zero, as
+  the papers write it, instead of the exact joint draw. `ibp_side="features"` puts the Indian
+  buffet process on the features. Tests check both birth moves against the exact posterior of
+  a problem small enough to enumerate. With these samplers `max_components="auto"` is
+  `min(n_samples, n_features) + 2 * max_births`, and a warning is raised if a birth finds no
+  free slot.
+- `presets.wood2006` (Wood et al. 2006) and `presets.rukat_yau2019` (Rukat & Yau 2019).
+  `benchmarks/papers/wood2006.py` reproduces Fig. 4: over 30 datasets per structure, 13 of 16
+  read-off points are within tolerance. At 1000 iterations the degree-1, undercomplete and
+  overcomplete graphs match (for example overcomplete in-degree error 2.78, published 2.8, and
+  structure error 5.7, published 3.8 +- 2.0); the disconnected graph reaches 0.39 and 0.21
+  against 0.05 and 0.05, because a few datasets keep a duplicated cause with its trials split
+  between the copies. With `births="metropolis"` errors stay near those of the paper's RJMCMC
+  sampler: births proposed from the prior are rarely accepted.
+  `benchmarks/papers/rukat_yau2019.py` reproduces Section 3.1 in part: the posterior mode of the
+  number of codes equals the true rank (2-10) in 74%, 67% and 59% of runs at 0%, 10% and 20%
+  flips (mean excess +0.22, +0.44, +0.63); from rank 5 up it is almost always exact, but at
+  ranks 2-4 a run often keeps an extra code that splits a dense true code. The presets'
+  docstrings list their departures from the papers, and where the authors' public code
+  departs from its paper.
 
 ### Changed
 - With a fixed `n_components`, every slot in use is reported as a component, and the slot

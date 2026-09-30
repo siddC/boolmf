@@ -28,6 +28,23 @@ from .utils.validation import row_seeds, to_binary_int8
 
 DEFAULT_SPLIT_MERGE = 10          # proposals per sweep when split_merge=True
 
+
+def _transpose_result(r):
+    """A chain run on X.T, expressed for X: activations and memberships trade places."""
+    r.member_mean, r.activation_mean = r.activation_mean, r.member_mean
+    if r.explained is not None:
+        r.explained = np.ascontiguousarray(r.explained.T)
+        r.predictive = np.ascontiguousarray(r.predictive.T)
+    for d in r.draws:
+        d["U"], d["Z"] = d["Z"], d["U"]
+        if "rho" in d:
+            d["pi"], d["rho"] = d["rho"], d["pi"]
+    return r
+
+
+def _is_real(value):
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
 __all__ = ["BoolMF", "AnchorComponent"]
 
 
@@ -93,8 +110,11 @@ class BoolMF(TransformerMixin, BaseEstimator):
         None learns the number of components (Indian buffet process); an int fixes it.
     max_components : int or "auto", default="auto"
         Number of component slots (truncation of the Indian buffet process).
-        ``"auto"`` uses ``max(1, min(n_samples, n_features) // 2)``. A warning is raised when
-        more than 80% of the slots are in use, since the cap then limits the rank.
+        ``"auto"`` uses ``max(1, min(n_samples, n_features) // 2)``, or
+        ``min(n_samples, n_features) + 2 * max_births`` with ``births`` other than
+        ``"slots"``. A warning is raised when more than 80% of the slots are in use (or, with
+        the collapsed sampler, when a birth found no free slot), since the cap then limits the
+        rank.
     likelihood : {"or_flip", "noisy_or"}, default="or_flip"
         ``"or_flip"``: P(x = 1) = detection if c >= 1, else background, where c is the number
         of active components containing the feature. ``"noisy_or"``: P(x = 1) =
@@ -150,6 +170,33 @@ class BoolMF(TransformerMixin, BaseEstimator):
         OrMachine's sampler).
     update_order : {"memberships_first", "activations_first"}, default="memberships_first"
         Which factor matrix each sweep updates first.
+    births : {"slots", "enumerate", "metropolis"}, default="slots"
+        How components are born and die under the Indian buffet process. ``"slots"``: a
+        truncated pool of ``max_components`` slots whose probabilities are sampled, with empty
+        slots switched on by Gibbs updates. ``"enumerate"``: the collapsed sampler of Wood,
+        Griffiths & Ghahramani (2006): each row keeps existing components with probability
+        m / N and draws its number of new components from the exact conditional (up to
+        ``max_births``) with their memberships summed out. ``"metropolis"``: the same
+        collapsed sampler with the births of Meeds et al. (2007), a Poisson(alpha / N) number
+        of new components replacing the row's own ones, accepted by Metropolis-Hastings. Both
+        need a shared (or fixed) probability on the other side (``membership_level="shared"``
+        or a float ``membership_prior``; with ``ibp_side="features"``, the activation side)
+        and ``split_merge=False``.
+    max_births : int, default=10
+        Most new components one row can add in one step (Wood et al. truncate at 10).
+    birth_members : {"exact", "gibbs"}, default="exact"
+        With ``births="enumerate"``, how the other side of the new components is drawn.
+        ``"exact"``: from its joint conditional given the row. ``"gibbs"``: starting from
+        zero, one Gibbs pass over the new components one at a time, as written in Wood et al.
+        (2006) and Rukat & Yau (2019). The two agree when one component is born; with several,
+        the pass is not a draw from the joint conditional, so the chain does not target the
+        exact posterior, but it gives the published transients: the first new component takes
+        most of the row's unexplained entries instead of a random share.
+    ibp_side : {"samples", "features"}, default="samples"
+        Which side carries the Indian buffet process. Wood et al. (2006) put it on the
+        observed variables (features), with sample activations independent Bernoulli(p):
+        ``ibp_side="features"`` with ``activation_level="shared"`` or a float
+        ``activation_prior``.
     n_chains : int, default=20
         Number of independent chains.
     max_sweeps : int, default=10000
@@ -264,6 +311,10 @@ class BoolMF(TransformerMixin, BaseEstimator):
         rate_estimation="bayes",
         update="gibbs",
         update_order="memberships_first",
+        births="slots",
+        max_births=10,
+        birth_members="exact",
+        ibp_side="samples",
         n_chains=20,
         max_sweeps=10000,
         burn_in="auto",
@@ -299,6 +350,10 @@ class BoolMF(TransformerMixin, BaseEstimator):
         self.rate_estimation = rate_estimation
         self.update = update
         self.update_order = update_order
+        self.births = births
+        self.max_births = max_births
+        self.birth_members = birth_members
+        self.ibp_side = ibp_side
         self.n_chains = n_chains
         self.max_sweeps = max_sweeps
         self.burn_in = burn_in
@@ -411,9 +466,42 @@ class BoolMF(TransformerMixin, BaseEstimator):
                               ("update_order", ("memberships_first", "activations_first"))):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name} must be one of {allowed}; got {getattr(self, name)!r}.")
-        if self.n_components is None and self.activation_prior is not None:
+        for name, allowed in (("births", ("slots", "enumerate", "metropolis")),
+                              ("birth_members", ("exact", "gibbs")),
+                              ("ibp_side", ("samples", "features"))):
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"{name} must be one of {allowed}; got {getattr(self, name)!r}.")
+        _int("max_births", 1)
+        ibp_features = self.ibp_side == "features"
+        if ibp_features and self.n_components is not None:
+            raise ValueError("ibp_side='features' needs n_components=None (the IBP).")
+        if ibp_features and (self.anchor_components or self._levels("detection_effects")
+                             or self._levels("background_effects")):
+            raise ValueError("ibp_side='features' does not combine with anchor components or "
+                             "rate effects.")
+        side = "activation" if ibp_features else "membership"
+        if self.n_components is None and not ibp_features and self.activation_prior is not None:
             raise ValueError("activation_prior applies with a fixed n_components; without it "
                              "the Indian buffet process is the prior on activations.")
+        if self.birth_members != "exact" and self.births != "enumerate":
+            raise ValueError("birth_members applies with births='enumerate'.")
+        if self.births != "slots":
+            if self.n_components is not None:
+                raise ValueError(f"births={self.births!r} is an IBP sampler; it needs "
+                                 "n_components=None.")
+            if self._n_split_merge() > 0:
+                raise ValueError(f"births={self.births!r} runs without split-merge moves; set "
+                                 "split_merge=False.")
+            other = getattr(self, f"{side}_prior")
+            if not (_is_real(other) or other == "empirical"
+                    or getattr(self, f"{side}_level") == "shared"):
+                raise ValueError(
+                    f"births={self.births!r} needs one {side} probability shared by all "
+                    f"components: set {side}_level='shared' or a float {side}_prior.")
+            if self._levels("detection_effects") or self._levels("background_effects") \
+                    or self.anchor_components:
+                raise ValueError(f"births={self.births!r} does not combine with rate effects "
+                                 "or anchor components.")
         if self.tied_rates and self.likelihood != "or_flip":
             raise ValueError("tied_rates needs likelihood='or_flip' (symmetric flip noise).")
         if self.rate_estimation == "mle" and self.likelihood != "or_flip":
@@ -473,8 +561,12 @@ class BoolMF(TransformerMixin, BaseEstimator):
             n_free = int(self.n_components)
             nonparametric = False
         else:
-            n_free = (max(1, min(n, F) // 2) if self.max_components == "auto"
-                      else int(self.max_components))
+            if self.max_components != "auto":
+                n_free = int(self.max_components)
+            elif self.births == "slots":
+                n_free = max(1, min(n, F) // 2)
+            else:                       # the collapsed sampler has no truncation of its own
+                n_free = min(n, F) + 2 * int(self.max_births)
             nonparametric = True
         n_slots = na + n_free
         n_init = n_free if not nonparametric else int(
@@ -486,15 +578,25 @@ class BoolMF(TransformerMixin, BaseEstimator):
         chain_seeds = [int(s.generate_state(1)[0]) for s in ss.spawn(self.n_chains)]
         self._transform_seed_ = int(np.random.SeedSequence(base_seed + 1).generate_state(1)[0])
 
+        flip = self.ibp_side == "features"
+        V_fit = np.ascontiguousarray(V.T) if flip else V
         init = self._initial_state(V, n_free)
+        if flip and isinstance(init, tuple):
+            init = (init[1].T, init[0].T)
         n_jobs = self.n_jobs if self.n_jobs is not None else 1
         n_workers = os.cpu_count() if n_jobs == -1 else max(1, min(n_jobs, self.n_chains))
         n_threads = max(1, (os.cpu_count() or 1) // max(1, n_workers)) if n_workers > 1 else 0
 
         density = float((V == 1).sum() / max((V >= 0).sum(), 1))
-        mem_spec = self._level_prior("membership_prior", self.membership_level, density, n_free)
-        act_spec = None if nonparametric else self._level_prior(
-            "activation_prior", self.activation_level, density, n_free)
+        if flip:        # fit the transpose: the IBP sits on its rows, the samples' prior on U
+            mem_spec = self._level_prior("activation_prior", self.activation_level, density,
+                                         n_free)
+            act_spec = None
+        else:
+            mem_spec = self._level_prior("membership_prior", self.membership_level, density,
+                                         n_free)
+            act_spec = None if nonparametric else self._level_prior(
+                "activation_prior", self.activation_level, density, n_free)
         mem_prior_spec_ab = (mem_spec.a, mem_spec.b) if mem_spec.kind == "beta" else (1.0, 1.0)
         cfg = ChainConfig(
             likelihood=self.likelihood,
@@ -527,11 +629,16 @@ class BoolMF(TransformerMixin, BaseEstimator):
             metropolis=self.update == "metropolised",
             activations_first=self.update_order == "activations_first",
             init_kind=self.init if isinstance(self.init, str) else "random",
+            births=self.births,
+            max_new=int(self.max_births),
+            exact_birth_members=self.birth_members == "exact",
             verbose=self.verbose,
         )
         results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(run_chain)(V, cfg, s, init) for s in chain_seeds
+            delayed(run_chain)(V_fit, cfg, s, init) for s in chain_seeds
         )
+        if flip:
+            results = [_transpose_result(r) for r in results]
         self._postprocess(V, results, na, nonparametric, n_free)
         return self
 
@@ -757,7 +864,11 @@ class BoolMF(TransformerMixin, BaseEstimator):
                 [results[c].draw_spread[:, 2] for c in good])))
         self.alpha_ = float(np.nanmean(np.concatenate([results[c].draw_alpha for c in good]))) \
             if nonparametric else None
-        if nonparametric and np.median(self.n_components_draws_) > 0.8 * n_free:
+        if self.births != "slots" and any(results[c].births[2] > 0 for c in good):
+            warnings.warn(
+                "births were cut short because every component slot was in use; increase "
+                "max_components.", stacklevel=3)
+        elif nonparametric and np.median(self.n_components_draws_) > 0.8 * n_free:
             warnings.warn(
                 "more than 80% of component slots are in use; increase max_components.",
                 stacklevel=3)

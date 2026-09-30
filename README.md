@@ -60,10 +60,18 @@ paper's results in `benchmarks/papers/`:
 ```python
 from boolmf import BoolMF, presets
 BoolMF(n_components=7, **presets.rukat2017)     # OrMachine, Rukat et al. (2017)
+BoolMF(**presets.rukat_yau2019)                 # OrMachine with an IBP, Rukat & Yau (2019)
+BoolMF(**presets.wood2006)                      # hidden causes, Wood et al. (2006)
 ```
 
 The same ingredients are available one by one (`tied_rates`, `rate_estimation`, `update`,
-`activation_prior`, `membership_level`, ...).
+`activation_prior`, `membership_level`, ...). Under the Indian buffet process, `births` picks
+how components appear and disappear: `"slots"` (the default, a truncated pool of component
+probabilities, used with split–merge moves), `"enumerate"` (the collapsed Gibbs sampler of
+Wood et al. 2006, which draws each row's number of new components from its exact conditional)
+or `"metropolis"` (the Metropolis–Hastings births of Meeds et al. 2007). `ibp_side="features"`
+puts the buffet on the features, as Wood et al. do. Each preset's docstring lists where it
+departs from the paper and how closely the published results are reproduced.
 
 ## Validation
 
