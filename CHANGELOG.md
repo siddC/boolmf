@@ -81,6 +81,15 @@
   ranks 2-4 a run often keeps an extra code that splits a dense true code. The presets'
   docstrings list their departures from the papers, and where the authors' public code
   departs from its paper.
+- `redundant_components_` and a warning when robust components look redundant: two
+  components with nearly the same carriers or members (Jaccard >= 0.9), or a component whose
+  entries are at least 90% covered by the others. Under the OR model such components add almost
+  nothing to the fit and usually mark a component split in two or duplicated. On the
+  Rukat & Yau (2019) reproduction grid (81 fits) it fires in 14 of the 26 fits that overestimate
+  the rank and in none of the 54 exact ones; it does not fire on the nested-factors benchmark.
+- `benchmarks/papers/rukat_yau2019.py` compares with the authors' code on the same data: it is
+  exact in 64 of 81 runs (this preset: 54), merges codes at ranks 2-3, and never shows the
+  published overestimate at 20% flips.
 
 ### Changed
 - With a fixed `n_components`, every slot in use is reported as a component, and the slot
