@@ -109,3 +109,31 @@ def test_input_handling():
     assert names[0] == "booleanmf0" and len(names) == dense.n_components_
     with pytest.raises(ValueError, match="shape"):
         dense.inverse_transform(np.ones((2, 5)))
+
+
+def test_mebf_recovers_blocks_and_stops_by_itself():
+    rng = np.random.default_rng(1)
+    members = np.zeros((3, 45), bool)
+    for k in range(3):
+        members[k, 15 * k:15 * k + 15] = True
+    usage = rng.random((150, 3)) < 0.3
+    X = (usage.astype(int) @ members.astype(int)) > 0
+    m = BooleanMF(algorithm="mebf", threshold=0.6)
+    W = m.fit_transform(X)
+    assert m.reconstruction_err_ == 0
+    assert {tuple(np.flatnonzero(h)) for h in m.components_} == \
+        {tuple(np.flatnonzero(u)) for u in members}
+    np.testing.assert_array_equal(W.astype(bool), usage[:, [
+        next(k for k in range(3) if (members[k] == h).all()) for h in m.components_.astype(bool)
+    ]])
+    assert BooleanMF(2, algorithm="mebf").fit(X).n_components_ == 2
+
+
+def test_mebf_follows_paper_on_low_density_simulation():
+    # wan2020.py: the paper's algorithm without noise, 100 x 100, five patterns, p0 = 0.2
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks" / "papers"))
+    from wan2020 import errors
+
+    e = errors(100, 0.2, 0.0, runs=10)
+    assert np.all(np.diff(e) < 0) and e[-1] < 0.1

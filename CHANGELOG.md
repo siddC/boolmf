@@ -17,8 +17,20 @@
     24 / 63 / 120 for 25 / 50 / 75 / 95 / 100%) and Tic-tac-toe (5 / 12 / 19 / 28 / 32,
     exact); Chess is one higher at partial coverage and exact at 124 for the full cover (the
     paper's Chess matrix has one more column).
+  - `algorithm="mebf"` (Wan et al. 2020), implemented as the paper's Algorithms 1-3, with
+    `threshold` as the expansion threshold t. Its published results come from the authors' R
+    code, which differs from the paper in five places, and are not reproduced
+    (`benchmarks/papers/wan2020.py` records the comparison). Without noise at low density the
+    error follows the published curve about one pattern behind (0.73 / 0.50 / 0.32 / 0.16 /
+    0.05 at k = 1-5 on 100 x 100, published 0.68 / 0.41 / 0.18 / 0.00). With 1% noise the
+    algorithm as written stalls once the large patterns are gone: the median column or row of
+    the residual is then mostly noise and yields tiny patterns that each lower the error
+    slightly, so weak signal detection is never reached (error 0.52 on 1000 x 1000). Table 1
+    cannot be reproduced: its published densities are impossible under the paper's definition,
+    and the authors' own code gives lower coverage on their single-cell data.
   - `n_components=None` stops by itself (GreConD at an exact cover, Asso when nothing improves
-    its cover function), and `coverage` stops at a fraction of the ones covered.
+    its cover function, MEBF when a component would raise the error), and `coverage` stops at
+    a fraction of the ones covered.
   Test data: UCI Mushroom and Tic-tac-toe (via PMLB), bundled in `tests/data/`.
 - Split–merge moves (`split_merge=True`, 10 proposals per sweep; an int sets the number, False
   turns them off). Each proposal changes two components at once and is accepted with the exact

@@ -15,6 +15,7 @@ SHORT = dict(n_chains=2, max_sweeps=40, burn_in=20, n_draws=10, thin=1, random_s
 @parametrize_with_checks(
     [BooleanMF(binarize=0.5),
      BooleanMF(3, algorithm="grecond", binarize=0.5),
+     BooleanMF(3, algorithm="mebf", binarize=0.5),
      BayesianBooleanMF(binarize=0.5, **SHORT),
      BayesianBooleanMF(binarize=0.5, detection_effects=("sample",),
                        background_effects=("sample",), **SHORT),

@@ -6,10 +6,10 @@ import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted, validate_data
 
-from ._algorithms import asso, asso_usage, grecond, grecond_usage
+from ._algorithms import asso, asso_usage, grecond, grecond_usage, mebf
 from .utils.validation import to_binary_int8
 
-ALGORITHMS = ("asso", "grecond")
+ALGORITHMS = ("asso", "grecond", "mebf")
 
 
 class BooleanMF(TransformerMixin, BaseEstimator):
@@ -27,16 +27,23 @@ class BooleanMF(TransformerMixin, BaseEstimator):
     n_components : int or None, default=None
         Number of components. None lets the algorithm stop by itself: ``"grecond"`` at an
         exact cover (or at ``coverage``), ``"asso"`` when no candidate improves its cover
-        function.
-    algorithm : {"asso", "grecond"}, default="asso"
+        function, ``"mebf"`` when a new component would raise the reconstruction error.
+    algorithm : {"asso", "grecond", "mebf"}, default="asso"
         ``"asso"``: Miettinen et al. (2008), The Discrete Basis Problem. Candidate components
         come from pairwise feature associations (confidence at least ``threshold``) and are
         chosen greedily to maximize ``positive_weight`` x (ones covered) - ``negative_weight``
         x (zeros covered); each sample uses a component when that raises its own score.
         ``"grecond"``: Belohlavek & Vychodil (2010), greedy formal concepts. Components never
         cover a zero ("from below") and, run to the end, reproduce X exactly.
+        ``"mebf"``: Wan et al. (2020), median expansion. Each component is grown from the
+        median column or row of the reordered residual matrix (or, when that would raise the
+        error, from the intersection of its two fullest columns or rows), adding the rows or
+        columns whose similarity to the seed exceeds ``threshold``. Fast (each step is linear
+        in the size of X).
     threshold : float in (0, 1], default=0.5
-        ``"asso"`` only: the association threshold tau. The paper tunes it per dataset.
+        ``"asso"``: the association threshold tau; ``"mebf"``: the expansion threshold t.
+        Both papers tune it per dataset; for MEBF a lower value covers more with fewer
+        components.
     positive_weight, negative_weight : float, default=1.0
         ``"asso"`` only: the weights w+ and w- of covered ones and covered zeros.
     coverage : float in (0, 1], default=1.0
@@ -62,10 +69,12 @@ class BooleanMF(TransformerMixin, BaseEstimator):
     Notes
     -----
     Missing entries are not supported. ``fit_transform`` returns the usage found while fitting,
-    which equals ``transform`` of the training data. For new data, ``transform`` applies the
-    algorithm's own usage rule to the fitted components: ``"asso"`` adds them in order, each
-    used by a sample when it raises the sample's cover score; ``"grecond"`` uses a component in
-    every sample that has all of its features.
+    which for Asso and GreConD equals ``transform`` of the training data. For new data,
+    ``transform`` applies the algorithm's own usage rule to the fitted components: ``"asso"``
+    adds them in order, each used by a sample when it raises the sample's cover score;
+    ``"grecond"`` uses a component in every sample that has all of its features. MEBF has no
+    rule for new samples, so ``transform`` uses Asso's with equal weights; for the training
+    data it can differ from the usage found while fitting.
     """
 
     def __init__(self, n_components=None, *, algorithm="asso", threshold=0.5,
@@ -136,8 +145,10 @@ class BooleanMF(TransformerMixin, BaseEstimator):
             W, H = asso(X, self.n_components, float(self.threshold),
                         float(self.positive_weight), float(self.negative_weight),
                         float(self.coverage))
-        else:
+        elif self.algorithm == "grecond":
             W, H = grecond(X, self.n_components, float(self.coverage))
+        else:
+            W, H = mebf(X, self.n_components, float(self.threshold), float(self.coverage))
         self.components_ = H.astype(np.uint8)
         self.n_components_ = H.shape[0]
         R = (W.astype(np.int64) @ H.astype(np.int64)) > 0
@@ -157,8 +168,10 @@ class BooleanMF(TransformerMixin, BaseEstimator):
         H = self.components_.astype(bool)
         if self.algorithm == "asso":
             W = asso_usage(X, H, float(self.positive_weight), float(self.negative_weight))
-        else:
+        elif self.algorithm == "grecond":
             W = grecond_usage(X, H)
+        else:
+            W = asso_usage(X, H)
         return W.astype(np.uint8)
 
     def inverse_transform(self, X):
