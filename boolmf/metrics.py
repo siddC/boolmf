@@ -1,4 +1,4 @@
-"""Fit metrics for BoolMF.
+"""Fit metrics for BayesianBooleanMF.
 
 The observed matrix is the ground truth and the prediction is "explained by an active
 component", so TP = present and explained, FP = absent but explained, FN = present but not
@@ -30,11 +30,11 @@ def _rates(tp, fp, fn, tn):
 
 
 def confusion_table(model, X=None, *, level="overall", entries=None, threshold=None):
-    """Confusion counts and rates of a fitted BoolMF against the observed matrix.
+    """Confusion counts and rates of a fitted BayesianBooleanMF against the observed matrix.
 
     Parameters
     ----------
-    model : fitted BoolMF
+    model : fitted BayesianBooleanMF
     X : array-like, optional
         None uses the training matrix (exact posterior averages); other samples are projected.
     level : {"overall", "sample", "feature"}
@@ -122,7 +122,7 @@ def calibration_curve(model, X=None, *, entries=None, n_bins=10):
 
     Parameters
     ----------
-    model : fitted BoolMF
+    model : fitted BayesianBooleanMF
     X : array-like, optional
         None uses the training matrix; pass the full matrix with ``entries`` to check
         entries held out during fitting.

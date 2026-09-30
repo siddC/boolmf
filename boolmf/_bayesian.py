@@ -1,4 +1,4 @@
-"""The BoolMF estimator."""
+"""The BayesianBooleanMF estimator."""
 
 import numbers
 import os
@@ -45,7 +45,7 @@ def _transpose_result(r):
 def _is_real(value):
     return isinstance(value, numbers.Real) and not isinstance(value, bool)
 
-__all__ = ["BoolMF", "AnchorComponent"]
+__all__ = ["BayesianBooleanMF", "AnchorComponent"]
 
 
 @dataclass
@@ -125,7 +125,7 @@ def _bayes_fdr_threshold(p, fdr):
     return float(s[ok[-1]]) if ok.size else 1.0
 
 
-class BoolMF(TransformerMixin, BaseEstimator):
+class BayesianBooleanMF(TransformerMixin, BaseEstimator):
     """Bayesian nonparametric Boolean matrix factorization.
 
     Models a binary matrix X (samples x features) as the union of latent components: each
@@ -134,7 +134,7 @@ class BoolMF(TransformerMixin, BaseEstimator):
     background presence. With ``n_components=None`` the number of components is given an
     Indian buffet process prior and learned from the data. The posterior is sampled with
     several independent Gibbs chains whose components are matched with the Hungarian
-    algorithm and pooled.
+    algorithm and pooled. For the standard (non-Bayesian) algorithms see ``BooleanMF``.
 
     Parameters
     ----------
@@ -1211,9 +1211,7 @@ class BoolMF(TransformerMixin, BaseEstimator):
         return pd.DataFrame(data).set_index("component")
 
     def get_feature_names_out(self, input_features=None):
-        """Output names for ``transform``: ``boolmf0``, ``boolmf1``, ..."""
+        """Output names for ``transform``: ``bayesianbooleanmf0``, ``bayesianbooleanmf1``, ..."""
         check_is_fitted(self, "components_")
-        return np.asarray([f"boolmf{i}" for i in range(self.components_.shape[0])], dtype=object)
-
-
-BooleanMF = BoolMF
+        return np.asarray([f"bayesianbooleanmf{i}" for i in range(self.components_.shape[0])],
+                          dtype=object)

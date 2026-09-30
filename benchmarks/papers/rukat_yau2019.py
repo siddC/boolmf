@@ -28,7 +28,7 @@ import warnings
 
 import numpy as np
 
-from boolmf import BoolMF, presets
+from boolmf import BayesianBooleanMF, presets
 
 N, D, DENSITY = 200, 500, 0.5
 RANKS = range(2, 11)
@@ -47,7 +47,7 @@ def posterior_mode(L, flip, seed):
     X = simulate(L, flip, np.random.default_rng(100 * L + seed))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        m = BoolMF(min_support=1, random_state=seed, **presets.rukat_yau2019).fit(X)
+        m = BayesianBooleanMF(min_support=1, random_state=seed, **presets.rukat_yau2019).fit(X)
     k = np.asarray(m.n_components_draws_).ravel()
     return int(np.bincount(k).argmax())
 

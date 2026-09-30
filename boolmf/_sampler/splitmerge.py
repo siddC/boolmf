@@ -1,4 +1,4 @@
-"""Split–merge moves for BoolMF.
+"""Split–merge moves for BayesianBooleanMF.
 
 Gibbs updates change one variable at a time, so they cannot leave states such as two components
 merged into one, a component that has swallowed a smaller one living in a subset of its carriers,

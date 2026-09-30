@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from boolmf import AnchorComponent, BooleanMF, BoolMF
+from boolmf import AnchorComponent, BayesianBooleanMF
 from boolmf.datasets import make_boolean_factors
 from boolmf.matching import jaccard_matrix
 
@@ -11,10 +11,6 @@ from .conftest import FAST
 
 def _best_jaccard(truth_members, members):
     return jaccard_matrix(truth_members, members).max(axis=1)
-
-
-def test_alias_is_same_class():
-    assert BooleanMF is BoolMF
 
 
 def test_recovers_components(small_data, fitted):
@@ -44,7 +40,7 @@ def test_fitted_attribute_shapes(small_data, fitted):
 @pytest.mark.parametrize("likelihood", ["noisy_or", "or_flip"])
 def test_both_likelihoods_run(small_data, likelihood):
     X, truth = small_data
-    m = BoolMF(likelihood=likelihood, **FAST).fit(X)
+    m = BayesianBooleanMF(likelihood=likelihood, **FAST).fit(X)
     members, _ = m.binarize_components()
     robust = m.component_flags_ == "robust"
     assert np.all(_best_jaccard(truth["members"], members[robust]) >= 0.8)
@@ -52,15 +48,15 @@ def test_both_likelihoods_run(small_data, likelihood):
 
 def test_fixed_number_of_components(small_data):
     X, _ = small_data
-    m = BoolMF(n_components=3, **FAST).fit(X)
+    m = BayesianBooleanMF(n_components=3, **FAST).fit(X)
     assert m.alpha_ is None
     assert m.components_.shape[0] <= 3
 
 
 def test_determinism_and_jobs(small_data):
     X, _ = small_data
-    a = BoolMF(**FAST).fit(X)
-    b = BoolMF(**{**FAST, "n_jobs": 2}).fit(X)
+    a = BayesianBooleanMF(**FAST).fit(X)
+    b = BayesianBooleanMF(**{**FAST, "n_jobs": 2}).fit(X)
     np.testing.assert_array_equal(a.components_, b.components_)
     np.testing.assert_array_equal(a.activations_, b.activations_)
 
@@ -71,12 +67,12 @@ def test_masked_entries_do_not_affect_fit(small_data):
     mask = rng.random(X.shape) < 0.1
     X2 = X.copy()
     X2[mask] = 1 - X2[mask]
-    a = BoolMF(**FAST).fit(X, mask=mask)
-    b = BoolMF(**FAST).fit(X2, mask=mask)
+    a = BayesianBooleanMF(**FAST).fit(X, mask=mask)
+    b = BayesianBooleanMF(**FAST).fit(X2, mask=mask)
     np.testing.assert_array_equal(a.components_, b.components_)
     X3 = X.copy()
     X3[mask] = np.nan
-    c = BoolMF(**FAST).fit(X3)
+    c = BayesianBooleanMF(**FAST).fit(X3)
     np.testing.assert_array_equal(a.components_, c.components_)
 
 
@@ -112,7 +108,7 @@ def test_inverse_transform_and_scores(small_data, fitted):
 def test_score_on_held_out_entries(small_data):
     X, _ = small_data
     mask = np.random.default_rng(2).random(X.shape) < 0.1
-    m = BoolMF(**FAST).fit(X, mask=mask)
+    m = BayesianBooleanMF(**FAST).fit(X, mask=mask)
     held = m.score(X, entries=mask)
     base_rate = X[~mask].mean()
     naive = np.mean(np.where(X[mask] == 1, np.log(base_rate), np.log1p(-base_rate)))
@@ -135,7 +131,7 @@ def test_get_draws_and_feature_names(fitted):
     acts = next(fitted.get_draws("activations"))
     assert acts.shape == fitted.activations_.shape
     names = fitted.get_feature_names_out()
-    assert names[0] == "boolmf0" and len(names) == fitted.components_.shape[0]
+    assert names[0] == "bayesianbooleanmf0" and len(names) == fitted.components_.shape[0]
 
 
 def test_summary(fitted):
@@ -147,7 +143,7 @@ def test_anchor_component(small_data):
     X, _ = small_data
     Xa = np.hstack([np.ones((X.shape[0], 5)), X])
     Xa[3, 0] = 0
-    m = BoolMF(anchor_components=[AnchorComponent(members=np.arange(5))], **FAST).fit(Xa)
+    m = BayesianBooleanMF(anchor_components=[AnchorComponent(members=np.arange(5))], **FAST).fit(Xa)
     assert m.component_flags_[0] == "anchor"
     np.testing.assert_allclose(m.activations_[:, 0], 1.0)
     np.testing.assert_allclose(m.components_[0, :5], 1.0)
@@ -156,10 +152,10 @@ def test_anchor_component(small_data):
 
 def test_inits(small_data):
     X, truth = small_data
-    m = BoolMF(init="nmf", init_params={"n_components": 3}, **FAST).fit(X)
+    m = BayesianBooleanMF(init="nmf", init_params={"n_components": 3}, **FAST).fit(X)
     assert m.n_components_ >= 1
     init = (truth["members"], truth["activations"])
-    m2 = BoolMF(init=init, **FAST).fit(X)
+    m2 = BayesianBooleanMF(init=init, **FAST).fit(X)
     members, _ = m2.binarize_components()
     robust = m2.component_flags_ == "robust"
     assert np.all(_best_jaccard(truth["members"], members[robust]) >= 0.9)
@@ -167,26 +163,27 @@ def test_inits(small_data):
 
 def test_rate_priors(small_data):
     X, _ = small_data
-    m = BoolMF(detection_prior=0.95, background_prior=stats.truncnorm(-2, 2, loc=0.02, scale=0.01),
-               likelihood="noisy_or", **FAST).fit(X)
+    background = stats.truncnorm(-2, 2, loc=0.02, scale=0.01)
+    m = BayesianBooleanMF(detection_prior=0.95, background_prior=background,
+                          likelihood="noisy_or", **FAST).fit(X)
     assert m.detection_rate_ == pytest.approx(0.95)
     with pytest.raises(ValueError):
-        BoolMF(detection_prior=stats.norm(0, 1), **FAST).fit(X)
+        BayesianBooleanMF(detection_prior=stats.norm(0, 1), **FAST).fit(X)
     with pytest.raises(ValueError):
-        BoolMF(detection_prior=1.5, **FAST).fit(X)
+        BayesianBooleanMF(detection_prior=1.5, **FAST).fit(X)
 
 
 def test_input_validation(small_data):
     X, _ = small_data
     with pytest.raises(ValueError, match="binary"):
-        BoolMF(**FAST).fit(X * 2)
-    BoolMF(binarize=0.5, **FAST).fit(X * 2)
+        BayesianBooleanMF(**FAST).fit(X * 2)
+    BayesianBooleanMF(binarize=0.5, **FAST).fit(X * 2)
     with pytest.raises(ValueError):
-        BoolMF(likelihood="gaussian").fit(X)
+        BayesianBooleanMF(likelihood="gaussian").fit(X)
     with pytest.raises(ValueError):
-        BoolMF(n_chains=0).fit(X)
+        BayesianBooleanMF(n_chains=0).fit(X)
     with pytest.raises(ValueError):
-        BoolMF(split_merge=-1).fit(X)
+        BayesianBooleanMF(split_merge=-1).fit(X)
 
 
 def test_sparse_and_dataframe_input(small_data):
@@ -194,17 +191,17 @@ def test_sparse_and_dataframe_input(small_data):
     import scipy.sparse as sp
 
     X, _ = small_data
-    a = BoolMF(**FAST).fit(sp.csr_matrix(X))
-    b = BoolMF(**FAST).fit(X)
+    a = BayesianBooleanMF(**FAST).fit(sp.csr_matrix(X))
+    b = BayesianBooleanMF(**FAST).fit(X)
     np.testing.assert_array_equal(a.components_, b.components_)
     df = pd.DataFrame(X, columns=[f"g{i}" for i in range(X.shape[1])])
-    c = BoolMF(**FAST).fit(df)
+    c = BayesianBooleanMF(**FAST).fit(df)
     assert list(c.feature_names_in_[:2]) == ["g0", "g1"]
 
 
 def test_split_merge_can_be_turned_off(small_data):
     X, truth = small_data
-    m = BoolMF(split_merge=False, **FAST).fit(X)
+    m = BayesianBooleanMF(split_merge=False, **FAST).fit(X)
     assert all(np.isnan(v) for v in m.split_merge_acceptance_.values())
     members, _ = m.binarize_components()
     robust = m.component_flags_ == "robust"
@@ -218,7 +215,7 @@ def test_per_sample_rates():
     bg = 1 / (1 + np.exp(-(np.log(0.01 / 0.99) + rng.normal(0, 0.7, n))))
     X = make_boolean_factors(n_samples=n, n_features=200, n_components=4, detection=det,
                              background=bg, random_state=1)
-    m = BoolMF(detection_effects=("sample",), background_effects="sample", **FAST).fit(X)
+    m = BayesianBooleanMF(detection_effects=("sample",), background_effects="sample", **FAST).fit(X)
     assert m.detection_rate_per_sample_.shape == m.background_rate_per_sample_.shape == (n,)
     lo, hi = m.detection_rate_per_sample_interval_.T
     assert np.all(lo <= m.detection_rate_per_sample_) and np.all(m.detection_rate_per_sample_ <= hi)
@@ -233,13 +230,13 @@ def test_per_sample_rates():
 def test_rate_effect_validation(small_data):
     X, _ = small_data
     with pytest.raises(NotImplementedError, match="v0.3"):
-        BoolMF(detection_effects=("feature",)).fit(X)
+        BayesianBooleanMF(detection_effects=("feature",)).fit(X)
     with pytest.raises(ValueError, match="requires likelihood='noisy_or'"):
-        BoolMF(detection_effects=("component",)).fit(X)        # default or_flip
+        BayesianBooleanMF(detection_effects=("component",)).fit(X)        # default or_flip
     with pytest.raises(ValueError):
-        BoolMF(background_effects=("component",)).fit(X)
+        BayesianBooleanMF(background_effects=("component",)).fit(X)
     with pytest.raises(ValueError, match="fixes"):
-        BoolMF(detection_effects=("sample",), detection_prior=0.9).fit(X)
+        BayesianBooleanMF(detection_effects=("sample",), detection_prior=0.9).fit(X)
 
 
 def test_per_component_rates_noisy_or():
@@ -247,7 +244,7 @@ def test_per_component_rates_noisy_or():
     X, truth = make_boolean_factors(n_samples=150, n_features=200, n_components=3,
                                     component_detection=lam, background=0.01, random_state=2,
                                     return_truth=True)
-    m = BoolMF(likelihood="noisy_or", detection_effects=("component",), **FAST).fit(X)
+    m = BayesianBooleanMF(likelihood="noisy_or", detection_effects=("component",), **FAST).fit(X)
     K = m.components_.shape[0]
     assert m.detection_rate_per_component_.shape == (K,)
     assert m.detection_rate_per_component_interval_.shape == (K, 2)
@@ -259,15 +256,15 @@ def test_per_component_rates_noisy_or():
     assert m.detection_component_spread_ > 0
     assert m.transform(X[:5]).shape == (5, K)                    # projection path
     assert np.all(np.isfinite(m.inverse_transform(m.transform(X[:5]))))
-    m2 = BoolMF(likelihood="noisy_or", detection_effects=("sample", "component"),
-                background_effects=("sample",), **FAST).fit(X)
+    m2 = BayesianBooleanMF(likelihood="noisy_or", detection_effects=("sample", "component"),
+                           background_effects=("sample",), **FAST).fit(X)
     assert m2.detection_rate_per_sample_.shape == (150,)
     assert m2.background_rate_per_sample_.shape == (150,)
     assert np.isfinite(m2.detection_rate_per_component_[m2.component_flags_ == "robust"]).all()
 
 
 def test_redundant_components_are_detected():
-    from boolmf._estimator import _redundant_components
+    from boolmf._bayesian import _redundant_components
 
     A = np.zeros((40, 4))
     A[:20, 0] = A[:20, 1] = 1              # 0 and 1: same carriers, different members

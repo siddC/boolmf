@@ -1,4 +1,4 @@
-"""Likelihoods, priors and scalar samplers for BoolMF (pure NumPy/SciPy)."""
+"""Likelihoods, priors and scalar samplers for BayesianBooleanMF (pure NumPy/SciPy)."""
 
 from dataclasses import dataclass
 

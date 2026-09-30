@@ -33,7 +33,7 @@ import warnings
 
 import numpy as np
 
-from boolmf import BoolMF, presets
+from boolmf import BayesianBooleanMF, presets
 
 STRUCTURES = {
     "degree1": np.eye(6, dtype=int),
@@ -97,7 +97,7 @@ def run(name, n_datasets=10, births="enumerate", iterations=ITERATIONS, seed=0):
         X = simulate(Zw, np.random.default_rng(seed + 1000 * r))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            m = BoolMF(random_state=seed + r, **params).fit(X)
+            m = BayesianBooleanMF(random_state=seed + r, **params).fit(X)
         for n, e in errors(m, Zw, iterations).items():
             res[n].append(e)
     return {n: (*np.mean(v, 0), *np.std(v, 0)) for n, v in res.items()}

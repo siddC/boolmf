@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from boolmf import BoolMF, presets
+from boolmf import BayesianBooleanMF, presets
 from boolmf.datasets import make_boolean_factors
 
 from .conftest import FAST
@@ -18,17 +18,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks" / "pap
 def test_option_validation(small_data):
     X, _ = small_data
     with pytest.raises(ValueError, match="or_flip"):
-        BoolMF(likelihood="noisy_or", tied_rates=True).fit(X)
+        BayesianBooleanMF(likelihood="noisy_or", tied_rates=True).fit(X)
     with pytest.raises(ValueError, match="or_flip"):
-        BoolMF(likelihood="noisy_or", rate_estimation="mle").fit(X)
+        BayesianBooleanMF(likelihood="noisy_or", rate_estimation="mle").fit(X)
     with pytest.raises(ValueError, match="split_merge"):
-        BoolMF(n_components=3, membership_prior=0.2).fit(X)
+        BayesianBooleanMF(n_components=3, membership_prior=0.2).fit(X)
     with pytest.raises(ValueError, match="fixed n_components"):
-        BoolMF(activation_prior=0.3).fit(X)
+        BayesianBooleanMF(activation_prior=0.3).fit(X)
     with pytest.raises(ValueError):
-        BoolMF(update="annealed").fit(X)
+        BayesianBooleanMF(update="annealed").fit(X)
     with pytest.raises(ValueError):
-        BoolMF(membership_prior="guess", split_merge=False, n_components=3).fit(X)
+        BayesianBooleanMF(membership_prior="guess", split_merge=False, n_components=3).fit(X)
 
 
 @pytest.mark.parametrize("params", [
@@ -42,7 +42,7 @@ def test_option_validation(small_data):
 def test_fixed_k_prior_levels_recover_components(small_data, params):
     X, truth = small_data
     K = truth["members"].shape[0]
-    m = BoolMF(n_components=K, split_merge=False, **{**FAST, **params}).fit(X)
+    m = BayesianBooleanMF(n_components=K, split_merge=False, **{**FAST, **params}).fit(X)
     assert m.components_.shape[1] == X.shape[1]
     assert np.isfinite(m.detection_rate_)
     if params.get("tied_rates"):
@@ -51,7 +51,7 @@ def test_fixed_k_prior_levels_recover_components(small_data, params):
 
 def test_fixed_alpha_and_empty_start(small_data):
     X, _ = small_data
-    m = BoolMF(alpha_prior=2.5, init="empty", **FAST).fit(X)
+    m = BayesianBooleanMF(alpha_prior=2.5, init="empty", **FAST).fit(X)
     assert m.alpha_ == 2.5
     assert m.n_components_ >= 1
 
@@ -70,5 +70,6 @@ def test_presets_are_read_only():
     with pytest.raises(TypeError):
         presets.rukat2017["n_chains"] = 4
     X = make_boolean_factors(n_samples=60, n_features=50, n_components=3, random_state=0)
-    m = BoolMF(n_components=3, random_state=0, **{**presets.rukat2017, "n_draws": 20}).fit(X)
+    params = {**presets.rukat2017, "n_draws": 20}
+    m = BayesianBooleanMF(n_components=3, random_state=0, **params).fit(X)
     assert m.chain_status_.shape == (1,)

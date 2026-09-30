@@ -109,7 +109,7 @@ def cross_validate_entries(estimator, X, cv=None, threshold=None):
 
     Parameters
     ----------
-    estimator : BoolMF
+    estimator : BayesianBooleanMF
     X : array-like of shape (n_samples, n_features)
     cv : EntryKFold, EntryShuffleSplit, int or None
         An int means ``EntryKFold(n_splits=cv)``; None means 5 folds.

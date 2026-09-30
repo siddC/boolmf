@@ -1,17 +1,32 @@
 # boolmf
 
-Bayesian nonparametric Boolean matrix factorization for Python.
+Boolean matrix factorization for Python, with a scikit-learn API.
 
 `boolmf` factorizes a binary matrix into overlapping latent components. Each component is a set
 of features that is either active or inactive in each sample, and a sample's observed features
-are the union of its active components plus noise. The number of components is learned from the
-data (Indian buffet process prior), membership and activation come back as posterior
-probabilities, and the API follows scikit-learn.
+are the union of its active components (plus noise). Two estimators:
+
+- **`BooleanMF`**: standard algorithms that search for the two binary factor matrices
+  (`algorithm="asso"`, Miettinen et al. 2008; `algorithm="grecond"`, Belohlavek & Vychodil
+  2010). Fast and deterministic, with a fixed number of components or a coverage target.
+- **`BayesianBooleanMF`**: a Bayesian model sampled by MCMC. The number of components is
+  learned (Indian buffet process prior), membership and activation come back as posterior
+  probabilities, noise rates are estimated, and missing entries are allowed.
 
 ```python
-from boolmf import BoolMF
+from boolmf import BooleanMF
 
-model = BoolMF(n_chains=20, n_jobs=-1, random_state=0).fit(X)   # X: samples x features, 0/1
+model = BooleanMF(n_components=10, algorithm="asso", threshold=0.8)
+W = model.fit_transform(X)          # X: samples x features, 0/1; W: usage, 0/1
+model.components_                   # components x features, 0/1
+model.reconstruction_err_           # entries where the Boolean product of W and H differs from X
+BooleanMF(algorithm="grecond").fit(X)   # exact cover from below, components never cover a 0
+```
+
+```python
+from boolmf import BayesianBooleanMF
+
+model = BayesianBooleanMF(n_chains=20, n_jobs=-1, random_state=0).fit(X)
 model.components_        # P(feature j is a member of component k), shape (K, n_features)
 model.activations_       # P(component k is active in sample i),    shape (n_samples, K)
 model.n_components_      # number of robust components
@@ -21,7 +36,7 @@ members, active = model.binarize_components(method="bfdr", fdr=0.01)
 model.transform(X_new)   # activation probabilities for new samples
 ```
 
-## The model
+## The Bayesian model
 
 For samples *i*, features *j* and components *k*, let *z<sub>ik</sub>* = 1 when component *k*
 is active in sample *i* and *u<sub>jk</sub>* = 1 when feature *j* is a member of component *k*.
@@ -54,14 +69,20 @@ reported with rank-normalized split R-hat and effective sample size (`rhat_`, `e
 
 ## Published methods
 
-`boolmf.presets` holds keyword sets that reproduce published samplers, each checked against the
-paper's results in `benchmarks/papers/`:
+Every method is checked by reproducing its paper's published results on the same inputs
+(`benchmarks/papers/`). For `BooleanMF`, the `algorithm` keyword selects the method: Asso
+reproduces the Digits errors of Miettinen et al. (2008, Table 3) within 5% and the Mushroom
+coverage counts of Belohlavek & Trnecka (2015, Table 4) exactly; GreConD reproduces the
+Mushroom, Tic-tac-toe and Chess counts of the same table.
+
+For `BayesianBooleanMF`, `boolmf.presets` holds keyword sets that reproduce published
+samplers:
 
 ```python
-from boolmf import BoolMF, presets
-BoolMF(n_components=7, **presets.rukat2017)     # OrMachine, Rukat et al. (2017)
-BoolMF(**presets.rukat_yau2019)                 # OrMachine with an IBP, Rukat & Yau (2019)
-BoolMF(**presets.wood2006)                      # hidden causes, Wood et al. (2006)
+from boolmf import BayesianBooleanMF, presets
+BayesianBooleanMF(n_components=7, **presets.rukat2017)     # OrMachine, Rukat et al. (2017)
+BayesianBooleanMF(**presets.rukat_yau2019)                 # OrMachine with an IBP, Rukat & Yau (2019)
+BayesianBooleanMF(**presets.wood2006)                      # hidden causes, Wood et al. (2006)
 ```
 
 The same ingredients are available one by one (`tied_rates`, `rate_estimation`, `update`,
@@ -79,7 +100,7 @@ departs from the paper and how closely the published results are reproduced.
 from boolmf.model_selection import EntryKFold, cross_validate_entries
 from boolmf.metrics import confusion_table, calibration_curve
 
-cross_validate_entries(BoolMF(), X, cv=EntryKFold(5))   # hold out entries, score them
+cross_validate_entries(BayesianBooleanMF(), X, cv=EntryKFold(5))   # hold out entries, score them
 confusion_table(model, level="sample")                  # precision, recall, specificity, NPV
 ```
 

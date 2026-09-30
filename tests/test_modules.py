@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from boolmf import BoolMF
+from boolmf import BayesianBooleanMF
 from boolmf.datasets import make_boolean_factors, make_nested_factors
 from boolmf.diagnostics import ess, geweke, rhat
 from boolmf.matching import jaccard_matrix, match_components
@@ -51,8 +51,8 @@ def test_entry_splitters(small_data):
 
 def test_cross_validate_entries(small_data):
     X, _ = small_data
-    res = cross_validate_entries(BoolMF(**FAST), X, cv=EntryShuffleSplit(2, test_size=0.1,
-                                                                          random_state=0))
+    cv = EntryShuffleSplit(2, test_size=0.1, random_state=0)
+    res = cross_validate_entries(BayesianBooleanMF(**FAST), X, cv=cv)
     assert set(res) == {"log_likelihood", "precision", "recall", "specificity", "npv"}
     assert res["log_likelihood"].shape == (2,)
     assert np.all(res["recall"] > 0.8)

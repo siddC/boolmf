@@ -1,4 +1,4 @@
-"""One MCMC chain for BoolMF: initialization, burn-in, sampling and draw storage."""
+"""One MCMC chain for BayesianBooleanMF: initialization, burn-in, sampling and draw storage."""
 
 from dataclasses import dataclass, field
 

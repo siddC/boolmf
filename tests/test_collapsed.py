@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from boolmf import BoolMF, presets
+from boolmf import BayesianBooleanMF, presets
 from boolmf._model import loglik_tables
 from boolmf._sampler.chain import _csr
 from boolmf._sampler.collapsed import BIRTH_ENUMERATE, BIRTH_METROPOLIS, collapsed_rows
@@ -93,18 +93,18 @@ def test_collapsed_sampler_targets_exact_posterior(births, likelihood):
 def test_birth_options_validation(small_data):
     X, _ = small_data
     with pytest.raises(ValueError, match="n_components=None"):
-        BoolMF(n_components=3, births="enumerate", split_merge=False).fit(X)
+        BayesianBooleanMF(n_components=3, births="enumerate", split_merge=False).fit(X)
     with pytest.raises(ValueError, match="split_merge=False"):
-        BoolMF(births="enumerate", membership_level="shared").fit(X)
+        BayesianBooleanMF(births="enumerate", membership_level="shared").fit(X)
     with pytest.raises(ValueError, match="shared"):
-        BoolMF(births="enumerate", split_merge=False).fit(X)
+        BayesianBooleanMF(births="enumerate", split_merge=False).fit(X)
     with pytest.raises(ValueError, match="births='enumerate'"):
-        BoolMF(births="metropolis", birth_members="gibbs", split_merge=False,
-               membership_level="shared").fit(X)
+        BayesianBooleanMF(births="metropolis", birth_members="gibbs", split_merge=False,
+                          membership_level="shared").fit(X)
     with pytest.raises(ValueError):
-        BoolMF(birth_members="joint").fit(X)
+        BayesianBooleanMF(birth_members="joint").fit(X)
     with pytest.raises(ValueError, match="n_components=None"):
-        BoolMF(n_components=3, ibp_side="features").fit(X)
+        BayesianBooleanMF(n_components=3, ibp_side="features").fit(X)
 
 
 @pytest.mark.parametrize("births, members", [("enumerate", "exact"), ("enumerate", "gibbs"),
@@ -117,9 +117,10 @@ def test_collapsed_sampler_recovers_simple_structure(births, members):
         Ut[12 * k:12 * k + 12, k] = True
     truth = (Zt.astype(int) @ Ut.T.astype(int)) > 0
     X = np.where(rng.random(truth.shape) < 0.03, ~truth, truth).astype(float)
-    m = BoolMF(births=births, birth_members=members, membership_level="shared",
-               split_merge=False, init="empty", n_chains=2, n_draws=50, thin=1, random_state=0,
-               burn_in=150 if births == "enumerate" else 2000).fit(X)   # MH births are slow
+    burn_in = 150 if births == "enumerate" else 2000              # MH births are slow
+    m = BayesianBooleanMF(births=births, birth_members=members, membership_level="shared",
+                          split_merge=False, init="empty", n_chains=2, n_draws=50, thin=1,
+                          random_state=0, burn_in=burn_in).fit(X)
     assert m.n_components_ == 3
     found = m.components_ > 0.5
     for k in range(3):
@@ -143,7 +144,7 @@ def test_ibp_on_features_transposes_results():
               "thin": 1, "min_support": 1}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        m = BoolMF(random_state=0, **params).fit(X)
+        m = BayesianBooleanMF(random_state=0, **params).fit(X)
     assert m.components_.shape == (m.n_components_, X.shape[1])
     assert m.activations_.shape == (X.shape[0], m.n_components_)
     children = {tuple(np.flatnonzero(c > 0.5)) for c in m.components_}

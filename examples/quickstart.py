@@ -1,7 +1,7 @@
-"""Fit BoolMF to synthetic data and inspect the result (needs pandas for the summary)."""
+"""Fit BayesianBooleanMF to synthetic data and inspect the result (needs pandas for the summary)."""
 import numpy as np
 
-from boolmf import BoolMF
+from boolmf import BayesianBooleanMF
 from boolmf.datasets import make_boolean_factors
 from boolmf.matching import jaccard_matrix
 from boolmf.metrics import confusion_table
@@ -9,7 +9,7 @@ from boolmf.metrics import confusion_table
 X, truth = make_boolean_factors(n_samples=300, n_features=400, n_components=6, missing=0.05,
                                 random_state=0, return_truth=True)
 
-model = BoolMF(n_chains=4, n_jobs=-1, max_sweeps=3000, random_state=0).fit(X)
+model = BayesianBooleanMF(n_chains=4, n_jobs=-1, max_sweeps=3000, random_state=0).fit(X)
 print(model.summary().round(3).to_string())
 print("robust components:", model.n_components_)
 print(f"detection rate {model.detection_rate_:.3f}, "
