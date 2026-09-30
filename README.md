@@ -52,6 +52,19 @@ cannot. Components are matched across chains with the Hungarian algorithm on Jac
 similarity, and the draws are pooled. Components are flagged `robust`, `low_support` or `not_robust`; convergence is
 reported with rank-normalized split R-hat and effective sample size (`rhat_`, `ess_`).
 
+## Published methods
+
+`boolmf.presets` holds keyword sets that reproduce published samplers, each checked against the
+paper's results in `benchmarks/papers/`:
+
+```python
+from boolmf import BoolMF, presets
+BoolMF(n_components=7, **presets.rukat2017)     # OrMachine, Rukat et al. (2017)
+```
+
+The same ingredients are available one by one (`tied_rates`, `rate_estimation`, `update`,
+`activation_prior`, `membership_level`, ...).
+
 ## Validation
 
 ```python

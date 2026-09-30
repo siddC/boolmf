@@ -49,6 +49,22 @@ def _row_state(seed, row):
     return s
 
 
+@njit(inline="always")
+def _decide(state, lo, old, metropolis):
+    """New value of a binary variable whose log-odds of being 1 given the rest is ``lo``.
+
+    Gibbs: draw from the conditional. Metropolised Gibbs (Liu 1996): always propose the other
+    value and accept with probability min(1, p(other) / p(current)).
+    """
+    state, u = _next_uniform(state)
+    if metropolis:
+        r = lo if old == 0 else -lo
+        if r >= 0.0 or u < np.exp(r):
+            return state, np.int8(1 - old)
+        return state, np.int8(old)
+    return state, (np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0))
+
+
 @njit(cache=True)
 def counts_from_state(Z, U):
     """C[i, j] = sum_k Z[i, k] * U[j, k]."""
@@ -66,7 +82,8 @@ def counts_from_state(Z, U):
 
 
 @njit(parallel=True, cache=True)
-def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask, seed):
+def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask, seed,
+                       metropolis=False):
     """Gibbs update of U[j, k] for every feature j (in parallel) and component k.
 
     Rows of U are independent given Z, so updating all features at once is an exact
@@ -74,12 +91,13 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
     """
     F, K = U.shape
     rs = 1 if T1.shape[0] > 1 else 0
+    pr = 1 if logit_rho.shape[0] > 1 else 0
     for j in prange(F):
         state = _row_state(seed, j)
         for k in range(K):
             if not update_mask[k]:
                 continue
-            lo = logit_rho[k]
+            lo = logit_rho[j * pr, k]
             old = U[j, k]
             for t in range(act_ptr[k], act_ptr[k + 1]):
                 i = act_idx[t]
@@ -92,8 +110,7 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
                     lo += T1[ti, cm + 1] - T1[ti, cm]
                 else:
                     lo += T0[ti, cm + 1] - T0[ti, cm]
-            state, u = _next_uniform(state)
-            new = np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0)
+            state, new = _decide(state, lo, old, metropolis)
             if new != old:
                 d = np.int16(new - old)
                 for t in range(act_ptr[k], act_ptr[k + 1]):
@@ -102,17 +119,19 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
 
 
 @njit(parallel=True, cache=True)
-def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask, seed):
+def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask, seed,
+                       metropolis=False):
     """Gibbs update of Z[i, k] for every sample i (in parallel) and component k."""
     n, K = Z.shape
     rs = 1 if T1.shape[0] > 1 else 0
+    pz = 1 if logit_pi.shape[0] > 1 else 0
     for i in prange(n):
         state = _row_state(seed, i)
         ti = i * rs
         for k in range(K):
             if not update_mask[k]:
                 continue
-            lo = logit_pi[k]
+            lo = logit_pi[i * pz, k]
             old = Z[i, k]
             for t in range(mem_ptr[k], mem_ptr[k + 1]):
                 j = mem_idx[t]
@@ -124,8 +143,7 @@ def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask,
                     lo += T1[ti, cm + 1] - T1[ti, cm]
                 else:
                     lo += T0[ti, cm + 1] - T0[ti, cm]
-            state, u = _next_uniform(state)
-            new = np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0)
+            state, new = _decide(state, lo, old, metropolis)
             if new != old:
                 d = np.int16(new - old)
                 for t in range(mem_ptr[k], mem_ptr[k + 1]):

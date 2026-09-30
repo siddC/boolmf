@@ -40,6 +40,13 @@ class ChainConfig:
     burn_rhat: float = 1.05
     n_split_merge: int = 10           # split-merge attempts per sweep (0 = off)
     n_launch: int = 4                 # restricted Gibbs scans that build each launch state
+    activation_prior: object = None   # LevelPrior for Z (None: IBP or Beta(1, 1) per component)
+    membership_prior: object = None   # LevelPrior for U (None: Beta(membership_ab) per component)
+    tied_rates: bool = False          # or_flip with background = 1 - detection
+    rate_estimation: str = "bayes"    # "bayes" (sample) or "mle" (point estimate every sweep)
+    metropolis: bool = False          # Metropolised Gibbs flips (Liu 1996) instead of Gibbs draws
+    activations_first: bool = False   # update Z before U in each sweep
+    init_kind: str = "random"         # "random", "uniform" or "empty" when no init tuple is given
     detection_effects: tuple = ()     # subset of ("sample", "component")
     background_effects: tuple = ()    # ("sample",) for per-sample background rates
     verbose: int = 0
@@ -96,11 +103,49 @@ def initial_state(V, cfg, rng, init):
         k0 = min(members.shape[0], K - na)
         U[:, na:na + k0] = members[:k0].T.astype(np.int8)
         Z[:, na:na + k0] = activations[:, :k0].astype(np.int8)
-    else:  # random
+    elif cfg.init_kind == "uniform":          # every free entry 0 or 1 with probability 1/2
+        U[:, na:] = rng.random((F, K - na)) < 0.5
+        Z[:, na:] = rng.random((n, K - na)) < 0.5
+    elif cfg.init_kind == "random":
         for k in range(na, min(K, na + cfg.n_init)):
             U[:, k] = rng.random(F) < 0.1
             Z[:, k] = rng.random(n) < 0.3
-    return Z, U
+    return Z, U                                # "empty": no free component to start with
+
+
+@dataclass
+class LevelPrior:
+    """Prior on activation (or membership) probabilities.
+
+    kind "ibp" (activations only), "beta" (rate ~ Beta(a, b)) or "fixed" (rate = value);
+    level "component" (one rate per component), "shared" (one rate for all components) or
+    "row" (one rate per sample, or per feature).
+    """
+
+    kind: str = "beta"
+    level: str = "component"
+    a: float = 1.0
+    b: float = 1.0
+    value: float = 0.5
+
+
+def _level_rates(prior, X, cols, rng, n_rows):
+    """Draw the probabilities of a binary matrix X (rows x slots) restricted to ``cols``.
+
+    Returns an array broadcastable to (rows, len(cols)): (1, m) or (rows, 1) or (1, 1).
+    """
+    m = len(cols)
+    if prior.kind == "fixed":
+        return np.full((1, 1), prior.value)
+    Xc = X[:, cols]
+    if prior.level == "component":
+        ones = Xc.sum(0, dtype=np.int64)
+        return rng.beta(prior.a + ones, prior.b + n_rows - ones)[None, :]
+    if prior.level == "shared":
+        ones = int(Xc.sum())
+        return np.full((1, 1), rng.beta(prior.a + ones, prior.b + n_rows * m - ones))
+    ones = Xc.sum(1, dtype=np.int64)                     # "row"
+    return rng.beta(prior.a + ones, prior.b + m - ones)[:, None]
 
 
 def run_chain(V, cfg, seed, init):
@@ -119,13 +164,19 @@ def run_chain(V, cfg, seed, init):
         mem_mask[a] = bool(learned)
     act_mask = free.copy()
 
+    ra, rb = cfg.membership_ab
     Z, U = initial_state(V, cfg, rng, init)
     engine = make_engine(cfg, V, Z, U, rng)
-    ra, rb = cfg.membership_ab
-    rho = np.clip(U.mean(0), 1e-4, 1 - 1e-4).astype(np.float64)
-    pi = np.clip(Z.mean(0), 1e-6, 1 - 1e-6).astype(np.float64)
-    pi[~free] = 1.0
-    alpha = 1.0
+    rho = np.clip(U.mean(0), 1e-4, 1 - 1e-4).astype(np.float64)[None, :]
+    pi = np.clip(Z.mean(0), 1e-6, 1 - 1e-6).astype(np.float64)[None, :]
+    pi[:, ~free] = 1.0
+    apri = cfg.activation_prior
+    mpri = cfg.membership_prior or LevelPrior("beta", "component", ra, rb)
+    if apri is not None and apri.kind == "fixed":
+        pi[:, free] = apri.value
+    if mpri.kind == "fixed":
+        rho = np.full((1, K), mpri.value)
+    alpha = cfg.alpha_prior.fixed if cfg.alpha_prior.fixed is not None else 1.0
 
     total_cap = cfg.max_sweeps
     trace = {m: [] for m in MONITORED}
@@ -150,39 +201,61 @@ def run_chain(V, cfg, seed, init):
     while True:
         # ---- one Gibbs sweep ---------------------------------------------------------
         engine.begin_sweep(Z, U)
-        act_ptr, act_idx = _csr(Z)
-        engine.update_memberships(V, U, _logit(rho), act_ptr, act_idx, mem_mask, rng)
-        nmem = U.sum(0, dtype=np.int64)
-        phantom = free & (nmem == 0)
-        if phantom.any():
-            Z[:, phantom] = 0                      # memberless slots carry no carriers
-        mem_ptr, mem_idx = _csr(U)
-        engine.update_activations(V, Z, _logit(pi), mem_ptr, mem_idx, act_mask, rng)
+        if cfg.activations_first:
+            mem_ptr, mem_idx = _csr(U)
+            engine.update_activations(V, Z, _logit(pi), mem_ptr, mem_idx, act_mask, rng,
+                                      cfg.metropolis)
+            act_ptr, act_idx = _csr(Z)
+            engine.update_memberships(V, U, _logit(rho), act_ptr, act_idx, mem_mask, rng,
+                                      cfg.metropolis)
+        else:
+            act_ptr, act_idx = _csr(Z)
+            engine.update_memberships(V, U, _logit(rho), act_ptr, act_idx, mem_mask, rng,
+                                      cfg.metropolis)
+            nmem = U.sum(0, dtype=np.int64)
+            phantom = free & (nmem == 0)
+            if phantom.any() and cfg.nonparametric:
+                Z[:, phantom] = 0                  # memberless slots carry no carriers
+            mem_ptr, mem_idx = _csr(U)
+            engine.update_activations(V, Z, _logit(pi), mem_ptr, mem_idx, act_mask, rng,
+                                      cfg.metropolis)
         nact = Z.sum(0, dtype=np.int64)
         orphan = free & (nact == 0)
-        if orphan.any():
+        if orphan.any() and cfg.nonparametric:
             U[:, orphan] = 0                       # carrier-less slots keep no members
         nmem = U.sum(0, dtype=np.int64)
         if cfg.n_split_merge > 0:
             phantom = free & (nmem == 0)
             if phantom.any():
                 Z[:, phantom] = 0                  # so every free slot is used or empty
-            zprior = (alpha / Kf, 1.0) if cfg.nonparametric else (1.0, 1.0)
+            zprior = (alpha / Kf, 1.0) if cfg.nonparametric else \
+                ((apri.a, apri.b) if apri is not None else (1.0, 1.0))
             engine.split_merge(V, Z, U, free, zprior, (ra, rb), cfg.n_split_merge,
                                cfg.n_launch, rng, sm_stats)
             nmem = U.sum(0, dtype=np.int64)
             nact = Z.sum(0, dtype=np.int64)
 
-        rho = rng.beta(ra + nmem, rb + F - nmem).astype(np.float64)
+        if mpri.kind != "fixed":
+            if mpri.level == "component":
+                rho = rng.beta(ra + nmem, rb + F - nmem).astype(np.float64)[None, :]
+            else:                               # shared or per feature, over the used slots
+                cols = np.flatnonzero((nmem > 0) & (nact > 0) | ~free) \
+                    if cfg.nonparametric else np.arange(K)
+                rho = np.broadcast_to(_level_rates(mpri, U, cols, rng, F),
+                                      (F if mpri.level == "row" else 1, K)).copy()
         if cfg.nonparametric:
             pi_f = rng.beta(alpha / Kf + nact[free], 1.0 + n - nact[free])
             pi_f = np.clip(pi_f, 1e-300, 1 - 1e-12)
-            rate = cfg.alpha_prior.rate - np.log(pi_f).sum() / Kf
-            alpha = rng.gamma(cfg.alpha_prior.shape + Kf, 1.0 / rate)
-        else:
-            pi_f = rng.beta(1.0 + nact[free], 1.0 + n - nact[free])
-        pi = np.ones(K)
-        pi[free] = pi_f
+            if cfg.alpha_prior.fixed is None:
+                rate = cfg.alpha_prior.rate - np.log(pi_f).sum() / Kf
+                alpha = rng.gamma(cfg.alpha_prior.shape + Kf, 1.0 / rate)
+            pi = np.ones((1, K))
+            pi[0, free] = pi_f
+        elif apri is None or apri.kind != "fixed":
+            prior_z = apri or LevelPrior("beta", "component", 1.0, 1.0)
+            rates = _level_rates(prior_z, Z, np.flatnonzero(free), rng, n)
+            pi = np.ones((n if prior_z.level == "row" else 1, K))
+            pi[:, free] = rates
 
         a, b, ll = engine.update_rates(V, Z, U, rng)
         n_active = int((free & (nmem >= cfg.min_support) & (nact >= cfg.min_support)).sum())
@@ -250,7 +323,7 @@ def run_chain(V, cfg, seed, init):
                 "slots": used.astype(np.int32),
                 "U": np.packbits(U[:, used], axis=0),
                 "Z": np.packbits(Z[:, used], axis=0),
-                "pi": pi[used].astype(np.float64),
+                "pi": pi.mean(0)[used].astype(np.float64),
             }
             if lam is not None:
                 draw["lam"] = lam.astype(np.float64)

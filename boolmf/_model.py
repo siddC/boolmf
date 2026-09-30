@@ -73,18 +73,24 @@ class RatePrior:
 
 @dataclass
 class PositivePrior:
-    """Gamma prior (shape, rate) for the IBP concentration alpha."""
+    """Gamma prior (shape, rate) for the IBP concentration alpha, or a fixed value."""
 
     shape: float = 1.0
     rate: float = 1.0
+    fixed: float = None
 
     @classmethod
     def from_param(cls, value, name):
         if value is None:
             return cls(1.0, 1.0)
+        if isinstance(value, (int, float, np.floating)) and not isinstance(value, bool):
+            if not value > 0:
+                raise ValueError(f"{name} fixed at {value}; it must be positive.")
+            return cls(fixed=float(value))
         dname = getattr(getattr(value, "dist", None), "name", None)
         if dname != "gamma":
-            raise ValueError(f"{name} must be None or a frozen scipy.stats.gamma distribution.")
+            raise ValueError(
+                f"{name} must be None, a positive float (fixed) or a frozen scipy.stats.gamma.")
         args, kw = value.args, value.kwds
         shape = args[0] if args else kw.get("a")
         loc = args[1] if len(args) > 1 else kw.get("loc", 0.0)

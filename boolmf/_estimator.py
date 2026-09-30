@@ -18,7 +18,7 @@ from ._model import (
     beta_params_or_raise,
     loglik_tables,
 )
-from ._sampler.chain import ChainConfig, run_chain
+from ._sampler.chain import ChainConfig, LevelPrior, run_chain
 from ._sampler.kernels import project_activations
 from ._sampler.logsurv import project_activations_ls
 from ._sampler.splitmerge import MOVE_NAMES
@@ -121,10 +121,35 @@ class BoolMF(TransformerMixin, BaseEstimator):
         Priors on the two rates (on the population rate when the rate varies by sample). None
         is Beta(1, 1). A float in (0, 1) fixes the rate. Any distribution with support in
         [0, 1] is accepted.
-    membership_prior : scipy.stats.beta frozen distribution or None, default=None
-        Prior on each component's membership rate. None is Beta(1, 1).
-    alpha_prior : scipy.stats.gamma frozen distribution or None, default=None
-        Prior on the Indian buffet process concentration. None is Gamma(1, 1).
+    membership_prior : scipy.stats.beta frozen distribution, float, "empirical" or None
+        Prior on the probability that a feature belongs to a component. A Beta distribution
+        (None is Beta(1, 1)) puts a random rate at ``membership_level``; a float fixes the rate;
+        ``"empirical"`` fixes it from the data density as in Rukat et al. (2017),
+        p = sqrt(1 - (1 - density)^(1 / n_components)).
+    membership_level : {"component", "shared", "feature"}, default="component"
+        Where a Beta membership rate lives: one per component, one shared by all components,
+        or one per feature.
+    activation_prior : scipy.stats.beta frozen distribution, float, "empirical" or None
+        Prior on the probability that a component is active in a sample, used when
+        ``n_components`` is set (otherwise the Indian buffet process is the prior). None is
+        Beta(1, 1); a float or ``"empirical"`` fixes the rate, as for ``membership_prior``.
+    activation_level : {"component", "shared", "sample"}, default="component"
+        Where a Beta activation rate lives.
+    alpha_prior : scipy.stats.gamma frozen distribution, float or None, default=None
+        Prior on the Indian buffet process concentration. None is Gamma(1, 1); a float fixes
+        alpha.
+    tied_rates : bool, default=False
+        ``or_flip`` only: background = 1 - detection, the symmetric flip noise of the
+        OrMachine (Rukat et al. 2017).
+    rate_estimation : {"bayes", "mle"}, default="bayes"
+        ``"bayes"`` samples the rates from their posterior. ``"mle"`` (``or_flip`` only) sets
+        them to their maximum-likelihood values after every sweep, as the OrMachine does.
+    update : {"gibbs", "metropolised"}, default="gibbs"
+        How each binary variable is updated: drawn from its conditional, or flipped with
+        probability min(1, p(flipped) / p(current)) (Metropolised Gibbs, Liu 1996; the
+        OrMachine's sampler).
+    update_order : {"memberships_first", "activations_first"}, default="memberships_first"
+        Which factor matrix each sweep updates first.
     n_chains : int, default=20
         Number of independent chains.
     max_sweeps : int, default=10000
@@ -154,10 +179,12 @@ class BoolMF(TransformerMixin, BaseEstimator):
         twice ``min_ess``). The log-likelihood and component count are reported in ``ess_``
         but do not trigger warnings: they mix slowly because short-lived components that
         absorb noise come and go, which leaves robust components unaffected.
-    init : {"random", "nmf"} or tuple of (members, activations), default="random"
-        Starting state for the chains. ``"nmf"`` fits ``sklearn.decomposition.NMF(**init_params)``
-        and binarizes each component. A tuple gives members (n_init, n_features) and
-        activations (n_samples, n_init) directly.
+    init : {"random", "uniform", "empty", "nmf"} or tuple of (members, activations)
+        Starting state for the chains (default ``"random"``: a few sparse random components).
+        ``"uniform"`` sets every entry of every component to 0 or 1 with probability 1/2;
+        ``"empty"`` starts with no components. ``"nmf"`` fits
+        ``sklearn.decomposition.NMF(**init_params)`` and binarizes each component. A tuple gives
+        members (n_init, n_features) and activations (n_samples, n_init) directly.
     init_params : dict or None, default=None
         Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"``.
     robustness_threshold : float, default=0.5
@@ -229,7 +256,14 @@ class BoolMF(TransformerMixin, BaseEstimator):
         detection_prior=None,
         background_prior=None,
         membership_prior=None,
+        membership_level="component",
+        activation_prior=None,
+        activation_level="component",
         alpha_prior=None,
+        tied_rates=False,
+        rate_estimation="bayes",
+        update="gibbs",
+        update_order="memberships_first",
         n_chains=20,
         max_sweeps=10000,
         burn_in="auto",
@@ -257,7 +291,14 @@ class BoolMF(TransformerMixin, BaseEstimator):
         self.detection_prior = detection_prior
         self.background_prior = background_prior
         self.membership_prior = membership_prior
+        self.membership_level = membership_level
+        self.activation_prior = activation_prior
+        self.activation_level = activation_level
         self.alpha_prior = alpha_prior
+        self.tied_rates = tied_rates
+        self.rate_estimation = rate_estimation
+        self.update = update
+        self.update_order = update_order
         self.n_chains = n_chains
         self.max_sweeps = max_sweeps
         self.burn_in = burn_in
@@ -281,6 +322,24 @@ class BoolMF(TransformerMixin, BaseEstimator):
         tags.input_tags.allow_nan = True
         tags.input_tags.sparse = True
         return tags
+
+    def _level_prior(self, name, level, density, n_components):
+        """LevelPrior from a ``*_prior`` parameter: Beta (or None), float, or "empirical"."""
+        value = getattr(self, name)
+        lev = {"component": "component", "shared": "shared"}.get(level, "row")
+        if isinstance(value, str):
+            if value != "empirical":
+                raise ValueError(f"{name} must be a Beta distribution, a float, 'empirical' "
+                                 f"or None; got {value!r}.")
+            L = max(1, n_components)
+            p = float(np.sqrt(1.0 - (1.0 - min(density, 1 - 1e-12)) ** (1.0 / L)))
+            return LevelPrior("fixed", "shared", value=float(np.clip(p, 1e-6, 1 - 1e-6)))
+        if isinstance(value, numbers.Real) and not isinstance(value, bool):
+            if not 0.0 < value < 1.0:
+                raise ValueError(f"{name} fixed at {value}; a fixed rate must lie in (0, 1).")
+            return LevelPrior("fixed", "shared", value=float(value))
+        a, b = beta_params_or_raise(value, name)
+        return LevelPrior("beta", lev, a, b)
 
     def _levels(self, name):
         value = getattr(self, name)
@@ -342,8 +401,38 @@ class BoolMF(TransformerMixin, BaseEstimator):
             v = getattr(self, name)
             if not isinstance(v, numbers.Real) or isinstance(v, bool) or v < 0:
                 raise ValueError(f"{name} must be a non-negative number; got {v!r}.")
-        if not (isinstance(self.init, tuple) or self.init in ("random", "nmf")):
-            raise ValueError("init must be 'random', 'nmf' or a (members, activations) tuple.")
+        if not (isinstance(self.init, tuple) or self.init in ("random", "uniform", "empty", "nmf")):
+            raise ValueError("init must be 'random', 'uniform', 'empty', 'nmf' or a "
+                             "(members, activations) tuple.")
+        for name, allowed in (("membership_level", ("component", "shared", "feature")),
+                              ("activation_level", ("component", "shared", "sample")),
+                              ("rate_estimation", ("bayes", "mle")),
+                              ("update", ("gibbs", "metropolised")),
+                              ("update_order", ("memberships_first", "activations_first"))):
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"{name} must be one of {allowed}; got {getattr(self, name)!r}.")
+        if self.n_components is None and self.activation_prior is not None:
+            raise ValueError("activation_prior applies with a fixed n_components; without it "
+                             "the Indian buffet process is the prior on activations.")
+        if self.tied_rates and self.likelihood != "or_flip":
+            raise ValueError("tied_rates needs likelihood='or_flip' (symmetric flip noise).")
+        if self.rate_estimation == "mle" and self.likelihood != "or_flip":
+            raise ValueError("rate_estimation='mle' is available for likelihood='or_flip'.")
+        effects = self._levels("detection_effects") + self._levels("background_effects")
+        if effects and (self.tied_rates or self.rate_estimation == "mle"):
+            raise ValueError("tied_rates and rate_estimation='mle' need global rates "
+                             "(no detection_effects or background_effects).")
+        if "component" in self._levels("detection_effects") and self.update != "gibbs":
+            raise ValueError("update='metropolised' is not available with component rates.")
+        if self._n_split_merge() > 0:
+            for name, level in (("membership", self.membership_level),
+                                ("activation", self.activation_level)):
+                pri = getattr(self, f"{name}_prior")
+                if level != "component" or isinstance(pri, (numbers.Real, str)) \
+                        and not isinstance(pri, bool):
+                    raise ValueError(
+                        f"split_merge needs a Beta {name} rate per component; set "
+                        f"split_merge=False to use {name}_level={level!r} or a fixed rate.")
         if self.init_params is not None and not isinstance(self.init_params, dict):
             raise ValueError("init_params must be a dict or None.")
         if self.binarize is not None and not isinstance(self.binarize, numbers.Real):
@@ -402,6 +491,11 @@ class BoolMF(TransformerMixin, BaseEstimator):
         n_workers = os.cpu_count() if n_jobs == -1 else max(1, min(n_jobs, self.n_chains))
         n_threads = max(1, (os.cpu_count() or 1) // max(1, n_workers)) if n_workers > 1 else 0
 
+        density = float((V == 1).sum() / max((V >= 0).sum(), 1))
+        mem_spec = self._level_prior("membership_prior", self.membership_level, density, n_free)
+        act_spec = None if nonparametric else self._level_prior(
+            "activation_prior", self.activation_level, density, n_free)
+        mem_prior_spec_ab = (mem_spec.a, mem_spec.b) if mem_spec.kind == "beta" else (1.0, 1.0)
         cfg = ChainConfig(
             likelihood=self.likelihood,
             n_slots=n_slots,
@@ -410,7 +504,7 @@ class BoolMF(TransformerMixin, BaseEstimator):
             nonparametric=nonparametric,
             prior_a=RatePrior.from_param(self.detection_prior, "detection_prior"),
             prior_b=RatePrior.from_param(self.background_prior, "background_prior"),
-            membership_ab=beta_params_or_raise(self.membership_prior, "membership_prior"),
+            membership_ab=mem_prior_spec_ab,
             alpha_prior=PositivePrior.from_param(self.alpha_prior, "alpha_prior"),
             burn_in=self.burn_in if self.burn_in == "auto" else int(self.burn_in),
             max_sweeps=int(max(self.max_sweeps, self.n_draws + 1)),
@@ -426,6 +520,13 @@ class BoolMF(TransformerMixin, BaseEstimator):
             n_split_merge=self._n_split_merge(),
             detection_effects=self._levels("detection_effects"),
             background_effects=self._levels("background_effects"),
+            activation_prior=act_spec,
+            membership_prior=mem_spec,
+            tied_rates=bool(self.tied_rates),
+            rate_estimation=self.rate_estimation,
+            metropolis=self.update == "metropolised",
+            activations_first=self.update_order == "activations_first",
+            init_kind=self.init if isinstance(self.init, str) else "random",
             verbose=self.verbose,
         )
         results = Parallel(n_jobs=n_workers, verbose=0)(
@@ -548,7 +649,11 @@ class BoolMF(TransformerMixin, BaseEstimator):
         def comp_slots(r):
             m = r.member_mean[:, na:] >= 0.5
             a = r.activation_mean[:, na:] >= 0.5
-            keep = np.flatnonzero((m.sum(0) >= 1) & (a.sum(0) >= 1))
+            if nonparametric:
+                keep = np.flatnonzero((m.sum(0) >= 1) & (a.sum(0) >= 1))
+            else:                   # a fixed number of components: every slot in use counts
+                keep = np.flatnonzero((r.member_mean[:, na:].sum(0) > 0)
+                                      & (r.activation_mean[:, na:].sum(0) > 0))
             return keep + na, (m[:, keep].T if keep.size else np.zeros((0, F), bool))
 
         for c in order:

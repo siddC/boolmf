@@ -43,7 +43,23 @@
   `inverse_transform` use the per-component rates. `make_boolean_factors` gains
   `component_detection` to simulate this model.
 
+- Option keywords for published methods, and `boolmf.presets` of named keyword sets that
+  reproduce them (`BoolMF(n_components=L, **presets.rukat2017)`):
+  - `activation_prior` / `activation_level` and `membership_level` (with `membership_prior`
+    now also accepting a float or `"empirical"`): Beta rates per component, shared by all
+    components, or per sample / per feature, or a fixed rate;
+  - `alpha_prior` accepts a float to fix alpha;
+  - `tied_rates` (`or_flip` with background = 1 - detection) and `rate_estimation="mle"`
+    (maximum-likelihood rates after every sweep);
+  - `update="metropolised"` (Metropolised Gibbs flips, Liu 1996) and `update_order`;
+  - `init="uniform"` and `init="empty"`.
+- `presets.rukat2017`, the OrMachine (Rukat et al. 2017). `benchmarks/papers/rukat2017.py`
+  reproduces Section 4.1: all 17 points read from Fig. 4 are within 0.03 of the published
+  reconstruction errors; a fast version runs in the test suite.
+
 ### Changed
+- With a fixed `n_components`, every slot in use is reported as a component, and the slot
+  resets used for births under the Indian buffet process no longer apply.
 - Nested-factors benchmark (500 samples, 20 true components, 8 chains; seeds 0 and 1), before →
   after, `or_flip`:
   - chains flagged `stuck`: 1 → 0 on both seeds;
