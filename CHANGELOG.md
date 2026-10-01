@@ -3,6 +3,23 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `presets.wagala2026`, the BBMF of Wagala, Samur & Parmigiani (2026), and what it needs:
+  - `BetaMixture`, a two-component Beta mixture prior for `membership_prior` or
+    `activation_prior` (fixed `n_components`): each probability comes from Beta(b1, b2) or
+    Beta(c1, c2) by an indicator with a Beta(d1, d2) weight, updated in the paper's order;
+  - `init="asso"`: every chain starts from the Asso factorization (`init_params` may set its
+    threshold and weights);
+  - `map_components_`, `map_activations_`, `map_log_posterior_`, `map_detection_rate_`,
+    `map_background_rate_`: the kept draw with the highest unnormalized log posterior over
+    all good chains (fixed `n_components`, no anchors, global rates);
+  - `store_draws` accepts an int, the most draws kept per chain (evenly spaced).
+  `benchmarks/papers/wagala2026.py` reproduces Table 1, Scenario 1 (regenerated with the
+  authors' script; identical to the paper's Figure 2): over three seeds the MAP
+  reconstruction scores specificity / F1 / MCC / error rate 0.957 / 0.922 / 0.893 / 0.043 on
+  average (error rate 0.038-0.050) against the published 0.960 / 0.928 / 0.903 / 0.039, and
+  Asso matches its published row exactly. Scenario 2's data, read from Figure 3, are not the
+  data behind Table 1 (Asso and the authors' own R code score differently on it); BBMF still
+  beats Asso there (error rate 0.012 against 0.021; published 0.019 against 0.037).
 - `BooleanMF`: standard Boolean matrix factorization, `fit` / `fit_transform` / `transform` /
   `inverse_transform` with 0/1 usage and components, `reconstruction_err_` (Hamming distance)
   and `coverage_`. Algorithms:
@@ -121,6 +138,9 @@
   published overestimate at 20% flips.
 
 ### Changed
+- `BayesianBooleanMF.fit_transform` now returns `fit(X).transform(X)`, as scikit-learn's
+  transformer contract expects; the activation probabilities from the chains themselves stay
+  in `activations_`.
 - The Bayesian estimator is now `BayesianBooleanMF` (it was `BoolMF`, alias `BooleanMF`), and
   `BooleanMF` is the new standard estimator, following scikit-learn's pairs such as
   `GaussianMixture` / `BayesianGaussianMixture`. The module `boolmf._estimator` is now

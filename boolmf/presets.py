@@ -13,7 +13,9 @@ preset's docstring lists where the implementation departs from the paper and why
 
 from types import MappingProxyType
 
-__all__ = ["rukat2017", "rukat_yau2019", "wood2006", "PRESETS"]
+from ._bayesian import BetaMixture
+
+__all__ = ["rukat2017", "rukat_yau2019", "wagala2026", "wood2006", "PRESETS"]
 
 rukat2017 = MappingProxyType(dict(
     likelihood="or_flip",
@@ -138,4 +140,50 @@ so the published claims are not reproduced by it either. Fits where codes were s
 raise the redundant-components warning (see ``redundant_components_``).
 """
 
-PRESETS = {"rukat2017": rukat2017, "rukat_yau2019": rukat_yau2019, "wood2006": wood2006}
+wagala2026 = MappingProxyType(dict(
+    likelihood="or_flip",
+    activation_level="sample",
+    membership_prior=BetaMixture((1.0, 1.0), (1.0, 1.0), (1.0, 1.0)),
+    membership_level="feature",
+    split_merge=False,
+    init="asso",
+    update="gibbs",
+    update_order="activations_first",
+    n_chains=4,
+    burn_in=20_000,
+    n_draws=80_000,
+    thin=1,
+    max_sweeps=100_000,
+    store_draws=1000,
+))
+"""BBMF of Wagala, Samur & Parmigiani (2026), A Bayesian Boolean Matrix Factorization with
+Application to Copy Number Analysis in Cancer (arXiv:2606.17491).
+
+Pass ``n_components`` (the paper's R). Model (Section 2.2): x_kg ~ Bernoulli(p11) where
+W o H is 1 and Bernoulli(p10) where it is 0; W_kr ~ Bernoulli(alpha_k) with alpha_k ~ Beta(a1,
+a2) per sample; H_rg ~ Bernoulli(beta_g) per feature, with beta_g ~ Beta(b1, b2) if psi_g = 1
+and Beta(c1, c2) if psi_g = 0, psi_g ~ Bernoulli(pi), pi ~ Beta(d1, d2) (``BetaMixture``).
+All hyperparameters are 1, as in the paper's analyses. Sampler (Algorithm 1): Gibbs updates
+of the probabilities and of every entry of W and H; 4 chains of 100,000 sweeps, the first
+20,000 discarded, all started from Asso (threshold 0.5, unit weights). Point estimate: the
+draw with the highest log posterior over all chains (``map_components_``,
+``map_activations_``); the posterior means in ``components_`` and ``activations_`` are
+reported too.
+
+The paper does not give priors or values for p11 and p10; as in the authors' code they get
+Beta(1, 1) priors and are sampled (``detection_prior`` / ``background_prior`` fix them), and
+the psi_g start at random, as there. Departures: the model keeps p11 above p10 (the posterior
+here is far from that boundary, so this changes nothing in practice); the log posterior that
+picks the MAP draw includes every term of the paper's Eq. 2 (the authors' code leaves out the
+terms of alpha, beta, psi and pi); ``store_draws`` keeps 1,000 draws per chain for
+``transform`` instead of all 80,000. The authors' code updates whole rows of W and columns of
+H at once; the paper and this preset update one entry at a time.
+
+Reproduced: Table 1, Scenario 1 (see ``benchmarks/papers/wagala2026.py``): over three seeds the
+MAP reconstruction averages specificity / F1 / MCC / error rate 0.957 / 0.922 / 0.893 / 0.043
+against the published 0.960 / 0.928 / 0.903 / 0.039. A single MAP draw is noisy: the error
+rate ranged from 0.038 to 0.050 across seeds.
+"""
+
+PRESETS = {"rukat2017": rukat2017, "rukat_yau2019": rukat_yau2019, "wagala2026": wagala2026,
+           "wood2006": wood2006}

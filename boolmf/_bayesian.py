@@ -45,7 +45,42 @@ def _transpose_result(r):
 def _is_real(value):
     return isinstance(value, numbers.Real) and not isinstance(value, bool)
 
-__all__ = ["BayesianBooleanMF", "AnchorComponent"]
+__all__ = ["BayesianBooleanMF", "AnchorComponent", "BetaMixture"]
+
+
+@dataclass(frozen=True)
+class BetaMixture:
+    """Two-component Beta mixture prior on activation or membership probabilities.
+
+    Each probability (one per component, per sample or per feature, as the matching
+    ``*_level`` says) is drawn from Beta(*component1) when its indicator psi is 1 and from
+    Beta(*component0) when it is 0; psi ~ Bernoulli(w) with w ~ Beta(*weight). With a sparse
+    and a dense component this is the spike-and-slab prior of Wagala, Samur & Parmigiani
+    (2026) on the per-feature membership probabilities.
+
+    Parameters
+    ----------
+    component1 : tuple of two floats, default=(1.0, 1.0)
+        Beta shape parameters (b1, b2) of the probabilities whose indicator is 1.
+    component0 : tuple of two floats, default=(1.0, 1.0)
+        Beta shape parameters (c1, c2) of the probabilities whose indicator is 0.
+    weight : tuple of two floats, default=(1.0, 1.0)
+        Beta shape parameters (d1, d2) of the prior on w = P(psi = 1).
+    """
+
+    component1: tuple = (1.0, 1.0)
+    component0: tuple = (1.0, 1.0)
+    weight: tuple = (1.0, 1.0)
+
+    def params(self):
+        out = []
+        for name in ("component1", "component0", "weight"):
+            value = tuple(float(v) for v in getattr(self, name))
+            if len(value) != 2 or min(value) <= 0:
+                raise ValueError(f"BetaMixture.{name} must be two positive numbers; got "
+                                 f"{getattr(self, name)!r}.")
+            out.extend(value)
+        return tuple(out)
 
 
 @dataclass
@@ -173,18 +208,21 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
         Priors on the two rates (on the population rate when the rate varies by sample). None
         is Beta(1, 1). A float in (0, 1) fixes the rate. Any distribution with support in
         [0, 1] is accepted.
-    membership_prior : scipy.stats.beta frozen distribution, float, "empirical" or None
+    membership_prior : scipy.stats.beta frozen distribution, BetaMixture, float, "empirical" \
+or None
         Prior on the probability that a feature belongs to a component. A Beta distribution
-        (None is Beta(1, 1)) puts a random rate at ``membership_level``; a float fixes the rate;
-        ``"empirical"`` fixes it from the data density as in Rukat et al. (2017),
-        p = sqrt(1 - (1 - density)^(1 / n_components)).
+        (None is Beta(1, 1)) puts a random rate at ``membership_level``; a ``BetaMixture``
+        (fixed ``n_components`` only) draws each rate from one of two Beta distributions, as
+        in Wagala et al. (2026); a float fixes the rate; ``"empirical"`` fixes it from the data
+        density as in Rukat et al. (2017), p = sqrt(1 - (1 - density)^(1 / n_components)).
     membership_level : {"component", "shared", "feature"}, default="component"
         Where a Beta membership rate lives: one per component, one shared by all components,
         or one per feature.
-    activation_prior : scipy.stats.beta frozen distribution, float, "empirical" or None
+    activation_prior : scipy.stats.beta frozen distribution, BetaMixture, float, \
+"empirical" or None
         Prior on the probability that a component is active in a sample, used when
         ``n_components`` is set (otherwise the Indian buffet process is the prior). None is
-        Beta(1, 1); a float or ``"empirical"`` fixes the rate, as for ``membership_prior``.
+        Beta(1, 1); a ``BetaMixture``, a float or ``"empirical"`` as for ``membership_prior``.
     activation_level : {"component", "shared", "sample"}, default="component"
         Where a Beta activation rate lives.
     alpha_prior : scipy.stats.gamma frozen distribution, float or None, default=None
@@ -258,20 +296,25 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
         twice ``min_ess``). The log-likelihood and component count are reported in ``ess_``
         but do not trigger warnings: they mix slowly because short-lived components that
         absorb noise come and go, which leaves robust components unaffected.
-    init : {"random", "uniform", "empty", "nmf"} or tuple of (members, activations)
+    init : {"random", "uniform", "empty", "nmf", "asso"} or tuple of (members, activations)
         Starting state for the chains (default ``"random"``: a few sparse random components).
         ``"uniform"`` sets every entry of every component to 0 or 1 with probability 1/2;
         ``"empty"`` starts with no components. ``"nmf"`` fits
-        ``sklearn.decomposition.NMF(**init_params)`` and binarizes each component. A tuple gives
+        ``sklearn.decomposition.NMF(**init_params)`` and binarizes each component. ``"asso"``
+        starts every chain from the Asso factorization (``BooleanMF(algorithm="asso")``,
+        threshold 0.5 and unit weights unless ``init_params`` sets ``threshold``,
+        ``positive_weight`` or ``negative_weight``; missing entries count as 0). A tuple gives
         members (n_init, n_features) and activations (n_samples, n_init) directly.
     init_params : dict or None, default=None
-        Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"``.
+        Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"``, or for Asso
+        when ``init="asso"``.
     robustness_threshold : float, default=0.5
         Fraction of chains a component must appear in to be flagged robust.
     min_support : float, default=3
         Components with fewer expected members or active samples are flagged low-support.
-    store_draws : bool, default=True
-        Keep bit-packed binary draws (needed by ``transform`` and ``get_draws``).
+    store_draws : bool or int, default=True
+        Keep bit-packed binary draws (needed by ``transform`` and ``get_draws``). An int keeps
+        at most that many per chain, evenly spaced over the kept draws.
     random_state : int, RandomState instance or None, default=None
     n_jobs : int or None, default=None
         Number of chains run in parallel (joblib).
@@ -311,6 +354,13 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
         intervals and ``detection_component_spread_`` the spread of the logit rates.
     alpha_ : float or None
         Posterior mean of the Indian buffet process concentration.
+    map_components_, map_activations_ : ndarray of uint8 or None
+        The kept draw with the highest unnormalized log posterior over all good chains (the
+        point estimate of Wagala et al. 2026), its components in the order of
+        ``components_``: shapes (n_components_total, n_features) and (n_samples,
+        n_components_total). Only with a fixed ``n_components``, no anchors and global rates;
+        otherwise None. ``map_log_posterior_``, ``map_detection_rate_`` and
+        ``map_background_rate_`` belong to the same draw.
     n_components_draws_ : ndarray of shape (n_good_chains, n_draws)
         Posterior draws of the number of active (non-anchor) components.
     rhat_, ess_ : dict
@@ -432,6 +482,8 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
             if not 0.0 < value < 1.0:
                 raise ValueError(f"{name} fixed at {value}; a fixed rate must lie in (0, 1).")
             return LevelPrior("fixed", "shared", value=float(value))
+        if isinstance(value, BetaMixture):
+            return LevelPrior("mixture", lev, mix=value.params())
         a, b = beta_params_or_raise(value, name)
         return LevelPrior("beta", lev, a, b)
 
@@ -495,7 +547,8 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
             v = getattr(self, name)
             if not isinstance(v, numbers.Real) or isinstance(v, bool) or v < 0:
                 raise ValueError(f"{name} must be a non-negative number; got {v!r}.")
-        if not (isinstance(self.init, tuple) or self.init in ("random", "uniform", "empty", "nmf")):
+        if not (isinstance(self.init, tuple)
+                or self.init in ("random", "uniform", "empty", "nmf", "asso")):
             raise ValueError("init must be 'random', 'uniform', 'empty', 'nmf' or a "
                              "(members, activations) tuple.")
         for name, allowed in (("membership_level", ("component", "shared", "feature")),
@@ -555,11 +608,19 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
             for name, level in (("membership", self.membership_level),
                                 ("activation", self.activation_level)):
                 pri = getattr(self, f"{name}_prior")
-                if level != "component" or isinstance(pri, (numbers.Real, str)) \
-                        and not isinstance(pri, bool):
+                if level != "component" or isinstance(pri, BetaMixture) \
+                        or isinstance(pri, (numbers.Real, str)) and not isinstance(pri, bool):
                     raise ValueError(
                         f"split_merge needs a Beta {name} rate per component; set "
                         f"split_merge=False to use {name}_level={level!r} or a fixed rate.")
+        for name in ("activation_prior", "membership_prior"):
+            if isinstance(getattr(self, name), BetaMixture):
+                if self.n_components is None:
+                    raise ValueError(f"a BetaMixture {name} needs a fixed n_components.")
+                getattr(self, name).params()
+        if not (isinstance(self.store_draws, (bool, np.bool_)) or (
+                isinstance(self.store_draws, numbers.Integral) and self.store_draws >= 1)):
+            raise ValueError("store_draws must be a bool or a positive int.")
         if self.init_params is not None and not isinstance(self.init_params, dict):
             raise ValueError("init_params must be a dict or None.")
         if self.binarize is not None and not isinstance(self.binarize, numbers.Real):
@@ -653,7 +714,11 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
             thin=self.thin if self.thin == "auto" else int(self.thin),
             rhat_threshold=float(self.rhat_threshold),
             n_init=n_init,
-            store_draws=bool(self.store_draws),
+            store_draws=self.store_draws if isinstance(self.store_draws, (bool, np.bool_))
+            else int(self.store_draws),
+            track_map=(not nonparametric and not na
+                       and not (self._levels("detection_effects")
+                                or self._levels("background_effects"))),
             store_entries=True,
             n_threads=n_threads,
             min_support=int(np.ceil(self.min_support)),
@@ -711,6 +776,17 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
                 warnings.warn("init has more components than slots; extra ones are dropped.",
                               stacklevel=3)
             return (members.astype(bool), activations.astype(bool))
+        if self.init == "asso":
+            from ._algorithms import asso
+
+            params = dict(self.init_params or {})
+            k = int(self.n_components) if self.n_components is not None else int(
+                min(n_free, max(2, np.sqrt(min(V.shape)))))
+            W, H = asso(V == 1, params.pop("n_components", k), params.pop("threshold", 0.5),
+                        params.pop("positive_weight", 1.0), params.pop("negative_weight", 1.0))
+            if params:
+                raise ValueError(f"init='asso' does not take {sorted(params)}.")
+            return (H, W)
         if self.init == "nmf":
             from sklearn.decomposition import NMF
 
@@ -731,6 +807,27 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
                             axis=1)
             return (members, acts)
         return "random"
+
+    def _set_map(self, results, good, n, F):
+        """The draw with the highest log posterior over all good chains (finite models with
+        global rates), with its components put in the order of ``components_``."""
+        for attr in ("map_components_", "map_activations_", "map_log_posterior_",
+                     "map_detection_rate_", "map_background_rate_"):
+            setattr(self, attr, None)
+        states = [(int(c), results[c].map_state) for c in good
+                  if results[c].map_state is not None]
+        if not states:
+            return
+        c, (lp, Zm, Um, a, b) = max(states, key=lambda t: t[1][0])
+        Kt = self.components_.shape[0]
+        H = np.zeros((Kt, F), np.uint8)
+        W = np.zeros((n, Kt), np.uint8)
+        for slot, k in self._slot_map_[c].items():
+            H[k] = Um[:, slot]
+            W[:, k] = Zm[:, slot]
+        self.map_components_, self.map_activations_ = H, W
+        self.map_log_posterior_ = float(lp)
+        self.map_detection_rate_, self.map_background_rate_ = float(a), float(b)
 
     def _postprocess(self, V, results, na, nonparametric, n_free):
         n, F = V.shape
@@ -863,6 +960,7 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
         self.prevalence_ = prevalence[perm]
         self.n_components_ = int((self.component_flags_ == "robust").sum())
         self._slot_map_ = {c: {s: int(inv[k]) for s, k in m.items()} for c, m in mapping.items()}
+        self._set_map(results, good, n, F)
 
         rates = np.concatenate([results[c].draw_rates for c in good])
         self.detection_rate_ = float(rates[:, 0].mean())
@@ -945,8 +1043,13 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
 
     # ------------------------------------------------------------------ inference outputs
     def fit_transform(self, X, y=None, mask=None):
-        """Fit and return the posterior activation probabilities of the training samples."""
-        return self.fit(X, y, mask=mask).activations_
+        """Fit, then ``transform`` the training samples (as scikit-learn expects).
+
+        ``activations_`` holds the activation probabilities from the chains themselves, which
+        sample activations and components jointly; ``transform`` holds the components fixed
+        at stored draws, so the two agree closely but not exactly.
+        """
+        return self.fit(X, y, mask=mask).transform(X, mask=mask)
 
     def transform(self, X, mask=None):
         """Posterior activation probabilities for (new) samples, components held fixed.
