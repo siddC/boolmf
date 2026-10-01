@@ -101,11 +101,48 @@ def test_input_handling():
         BooleanMF(3).fit(Xn)
     with pytest.raises(ValueError, match="binary"):
         BooleanMF(3).fit(scores)
-    for params in (dict(algorithm="panda"), dict(n_components=0), dict(threshold=0.0),
-                   dict(threshold=1.5), dict(positive_weight=0), dict(coverage=0)):
+    for params in (dict(algorithm="hyper"), dict(n_components=0), dict(threshold=0.0),
+                   dict(threshold=1.5), dict(positive_weight=0), dict(coverage=0),
+                   dict(cost="mdl"), dict(item_order="random"), dict(row_tolerance=1.5),
+                   dict(n_rounds=-1), dict(rho=-1)):
         with pytest.raises(ValueError):
             BooleanMF(**params).fit(X)
     names = dense.get_feature_names_out()
     assert names[0] == "booleanmf0" and len(names) == dense.n_components_
     with pytest.raises(ValueError, match="shape"):
         dense.inverse_transform(np.ones((2, 5)))
+
+
+@pytest.mark.parametrize("cost", ["je", "jp", "ja"])
+def test_panda_recovers_blocks(cost):
+    rng = np.random.default_rng(2)
+    members = np.zeros((3, 45), bool)
+    for k in range(3):
+        members[k, 15 * k:15 * k + 15] = True
+    X = ((rng.random((150, 3)) < 0.3).astype(int) @ members.astype(int)) > 0
+    m = BooleanMF(algorithm="panda", cost=cost).fit(X)
+    assert m.reconstruction_err_ == 0
+    assert {tuple(np.flatnonzero(h)) for h in m.components_} == \
+        {tuple(np.flatnonzero(u)) for u in members}
+
+
+def test_panda_reproduces_table4_cell():
+    # lucchese2014.py, K = 5 embedded patterns, 5% noise, at the setting its sweep selects
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks" / "papers"))
+    from lucchese2014 import normalized, simulate
+
+    X, usage, basis = simulate(5, 0.05, np.random.default_rng(5005))
+    m = BooleanMF(64, algorithm="panda", item_order="frequency", row_tolerance=0.5,
+                  column_tolerance=0.1)
+    W = m.fit_transform(X)
+    assert 5 <= m.n_components_ <= 8
+    j = normalized(X, W.astype(bool), m.components_.astype(bool))
+    assert abs(j - normalized(X, usage, basis)) <= 0.03 and abs(j - 0.51) <= 0.06
+
+
+def test_panda_randomized_rounds_are_reproducible():
+    X = _load("tic_tac_toe")
+    a = BooleanMF(5, algorithm="panda", n_rounds=3, random_state=0).fit(X)
+    b = BooleanMF(5, algorithm="panda", n_rounds=3, random_state=0).fit(X)
+    np.testing.assert_array_equal(a.components_, b.components_)

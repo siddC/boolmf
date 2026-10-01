@@ -24,7 +24,9 @@ checks pass.
   paper's published results: Rukat et al. 2017 (done), Wood et al. 2006, Meeds et al. 2007
   births and Rukat & Yau 2019 (done), Wagala et al. 2026
 - Standard Boolean matrix factorization as its own estimator, `BooleanMF`, next to
-  `BayesianBooleanMF`: Asso and GreConD (done), then MEBF and PANDA+
+  `BayesianBooleanMF`: Asso, GreConD and PANDA+ (done). MEBF
+  (Wan et al. 2020) was dropped: its published results come from code that differs from the
+  paper in five places, and the paper's own algorithm stalls on noisy data
 - First real dataset: a subsample of a bacterial pangenome presence/absence matrix, compared with
   an NMF baseline; binarization at 0.5 against Bayesian FDR
 

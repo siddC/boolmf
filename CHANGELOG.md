@@ -17,8 +17,20 @@
     24 / 63 / 120 for 25 / 50 / 75 / 95 / 100%) and Tic-tac-toe (5 / 12 / 19 / 28 / 32,
     exact); Chess is one higher at partial coverage and exact at 124 for the full cover (the
     paper's Chess matrix has one more column).
+  - `algorithm="panda"`: PANDA+ (Lucchese et al. 2014), Algorithms 1-3, with `cost` (`"je"`
+    the MDL Typed XOR encoding of Miettinen & Vreeken 2011, which the paper cites; `"jp"` with
+    `rho`; `"ja"`), `row_tolerance` / `column_tolerance` (eps_r / eps_c), `item_order`
+    (frequency, couples, correlation) and `n_rounds` of randomized orders. Reproduces Table 4
+    on the paper's synthetic generator (`benchmarks/papers/lucchese2014.py`, 16 cells, the
+    thresholds and item order swept as in Table 3). In 14 of 16 cells the number of patterns
+    is between K and K + 3 (published: up to K + 5) and J_E is within 0.03 of the embedded
+    patterns' own J_E on the same draw and within 0.06 of the published value. The misses are
+    at K = 20: at 3% noise 28 patterns and J_E 0.411 (published 23 and 0.41; embedded patterns
+    0.357; 25 and 0.398 with 20 randomized rounds), at 7% J_E 0.576 (published 0.60; embedded
+    0.546).
   - `n_components=None` stops by itself (GreConD at an exact cover, Asso when nothing improves
-    its cover function), and `coverage` stops at a fraction of the ones covered.
+    its cover function, PANDA+ when a component would raise its cost), and
+    `coverage` stops at a fraction of the ones covered.
   Test data: UCI Mushroom and Tic-tac-toe (via PMLB), bundled in `tests/data/`.
 - Split–merge moves (`split_merge=True`, 10 proposals per sweep; an int sets the number, False
   turns them off). Each proposal changes two components at once and is accepted with the exact
