@@ -8,7 +8,9 @@ are the union of its active components (plus noise). Two estimators:
 
 - **`BooleanMF`**: standard algorithms that search for the two binary factor matrices
   (`algorithm="asso"`, Miettinen et al. 2008; `algorithm="grecond"`, Belohlavek & Vychodil
-  2010). Fast and deterministic, with a fixed number of components or a coverage target.
+  2010; `algorithm="panda"`, PANDA+, Lucchese et al. 2014, which can also pick the number of
+  components by MDL). Fast and deterministic, with a fixed number of components or a coverage
+  target.
 - **`BayesianBooleanMF`**: a Bayesian model sampled by MCMC. The number of components is
   learned (Indian buffet process prior), membership and activation come back as posterior
   probabilities, noise rates are estimated, and missing entries are allowed.
@@ -73,7 +75,8 @@ Every method is checked by reproducing its paper's published results on the same
 (`benchmarks/papers/`). For `BooleanMF`, the `algorithm` keyword selects the method: Asso
 reproduces the Digits errors of Miettinen et al. (2008, Table 3) within 5% and the Mushroom
 coverage counts of Belohlavek & Trnecka (2015, Table 4) exactly; GreConD reproduces the
-Mushroom, Tic-tac-toe and Chess counts of the same table.
+Mushroom, Tic-tac-toe and Chess counts of the same table; PANDA+ reproduces the synthetic
+results of Lucchese et al. (2014, Table 4).
 
 For `BayesianBooleanMF`, `boolmf.presets` holds keyword sets that reproduce published
 samplers:
