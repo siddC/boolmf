@@ -1,4 +1,4 @@
-"""Numba kernels for the BoolMF Gibbs sampler.
+"""Numba kernels for the BayesianBooleanMF Gibbs sampler.
 
 Conventions
 -----------

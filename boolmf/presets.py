@@ -1,14 +1,14 @@
-"""Named presets that reproduce published methods with ``BoolMF``.
+"""Named presets that reproduce published methods with ``BayesianBooleanMF``.
 
 Each preset is a read-only mapping of keyword arguments::
 
-    from boolmf import BoolMF, presets
-    model = BoolMF(n_components=7, **presets.rukat2017)
+    from boolmf import BayesianBooleanMF, presets
+    model = BayesianBooleanMF(n_components=7, **presets.rukat2017)
 
 Passing a keyword that the preset also sets raises ``TypeError``; to change one, merge first:
-``BoolMF(n_components=7, **{**presets.rukat2017, "n_chains": 4})``. ``benchmarks/papers/``
-reproduces each paper's published results with its preset, and each preset's docstring lists
-where the implementation departs from the paper and why.
+``BayesianBooleanMF(n_components=7, **{**presets.rukat2017, "n_chains": 4})``.
+``benchmarks/papers/`` reproduces each paper's published results with its preset, and each
+preset's docstring lists where the implementation departs from the paper and why.
 """
 
 from types import MappingProxyType

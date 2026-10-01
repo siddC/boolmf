@@ -29,7 +29,7 @@ def to_binary_int8(X, mask=None, binarize=None):
             ok = missing | (X == 0) | (X == 1)
             if not ok.all():
                 raise ValueError(
-                    "BoolMF expects binary input (0/1, NaN for missing). "
+                    "Expected binary input (0/1, NaN for missing where supported). "
                     "Pass binarize=<threshold> to binarize other values."
                 )
             V = np.where(missing, 0, X).astype(np.int8)

@@ -4,7 +4,7 @@ import time
 
 import numpy as np
 
-from boolmf import BoolMF
+from boolmf import BayesianBooleanMF
 from boolmf.datasets import make_nested_factors
 from boolmf.matching import jaccard_matrix
 from boolmf.model_selection import EntryShuffleSplit
@@ -22,8 +22,9 @@ def main():
     X, truth = make_nested_factors(random_state=args.seed, return_truth=True)
     test = next(EntryShuffleSplit(test_size=0.1, random_state=args.seed).split(X))
     t = time.time()
-    m = BoolMF(likelihood=args.likelihood, n_chains=args.chains, n_jobs=args.jobs,
-               max_sweeps=args.max_sweeps, n_draws=100, random_state=args.seed).fit(X, mask=test)
+    m = BayesianBooleanMF(likelihood=args.likelihood, n_chains=args.chains, n_jobs=args.jobs,
+                          max_sweeps=args.max_sweeps, n_draws=100, random_state=args.seed)
+    m.fit(X, mask=test)
     elapsed = time.time() - t
 
     members, acts = m.binarize_components()

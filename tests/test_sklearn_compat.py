@@ -7,17 +7,20 @@ import warnings
 
 from sklearn.utils.estimator_checks import parametrize_with_checks
 
-from boolmf import BoolMF
+from boolmf import BayesianBooleanMF, BooleanMF
+
+SHORT = dict(n_chains=2, max_sweeps=40, burn_in=20, n_draws=10, thin=1, random_state=0)
 
 
 @parametrize_with_checks(
-    [BoolMF(binarize=0.5, n_chains=2, max_sweeps=40, burn_in=20, n_draws=10, thin=1,
-            random_state=0),
-     BoolMF(binarize=0.5, detection_effects=("sample",), background_effects=("sample",),
-            n_chains=2, max_sweeps=40, burn_in=20, n_draws=10, thin=1, random_state=0),
-     BoolMF(binarize=0.5, likelihood="noisy_or", detection_effects=("sample", "component"),
-            background_effects=("sample",), n_chains=2, max_sweeps=40, burn_in=20, n_draws=10,
-            thin=1, random_state=0)],
+    [BooleanMF(binarize=0.5),
+     BooleanMF(3, algorithm="grecond", binarize=0.5),
+     BayesianBooleanMF(binarize=0.5, **SHORT),
+     BayesianBooleanMF(binarize=0.5, detection_effects=("sample",),
+                       background_effects=("sample",), **SHORT),
+     BayesianBooleanMF(binarize=0.5, likelihood="noisy_or",
+                       detection_effects=("sample", "component"),
+                       background_effects=("sample",), **SHORT)],
 )
 def test_sklearn_compatible_estimator(estimator, check):
     with warnings.catch_warnings():

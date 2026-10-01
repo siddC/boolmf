@@ -23,7 +23,7 @@ import warnings
 
 import numpy as np
 
-from boolmf import BoolMF, presets
+from boolmf import BayesianBooleanMF, presets
 
 PUBLISHED = {
     (100, 7, 0.5): {0.20: 0.015, 0.25: 0.05, 0.30: 0.15, 0.35: 0.27, 0.40: 0.325, 0.45: 0.405,
@@ -64,7 +64,7 @@ def run(N, L, density, flip, repeats, seed=0, observed=False):
         X, truth = simulate(N, L, density, flip, rng)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            m = BoolMF(n_components=L, random_state=seed + r, **params).fit(X)
+            m = BayesianBooleanMF(n_components=L, random_state=seed + r, **params).fit(X)
         errs.append(reconstruction_error(m, truth))
     return float(np.mean(errs)), float(np.std(errs))
 

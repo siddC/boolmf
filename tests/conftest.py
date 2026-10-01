@@ -1,6 +1,6 @@
 import pytest
 
-from boolmf import BoolMF
+from boolmf import BayesianBooleanMF
 from boolmf.datasets import make_boolean_factors
 
 FAST = dict(n_chains=2, max_sweeps=400, burn_in=200, n_draws=40, thin=2, random_state=0)
@@ -16,4 +16,4 @@ def small_data():
 @pytest.fixture(scope="session")
 def fitted(small_data):
     X, _ = small_data
-    return BoolMF(**FAST).fit(X)
+    return BayesianBooleanMF(**FAST).fit(X)

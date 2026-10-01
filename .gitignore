@@ -13,3 +13,9 @@ docs/auto_examples/
 .ipynb_checkpoints/
 *.npy
 *.npz
+
+# small test matrices
+!tests/data/*.npz
+
+# downloaded benchmark data
+benchmarks/papers/.cache/

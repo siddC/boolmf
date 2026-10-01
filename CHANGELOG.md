@@ -3,6 +3,23 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `BooleanMF`: standard Boolean matrix factorization, `fit` / `fit_transform` / `transform` /
+  `inverse_transform` with 0/1 usage and components, `reconstruction_err_` (Hamming distance)
+  and `coverage_`. Algorithms:
+  - `algorithm="asso"` (Miettinen et al. 2008, The Discrete Basis Problem), with `threshold`
+    (tau), `positive_weight` and `negative_weight` (w+ and w-). Reproduces the Digits errors
+    of Table 3 with the best tau and w+ over a grid (120,980 / 103,466 / 85,892 at k = 5 / 10
+    / 20, published 124,600 / 108,500 / 87,800; the paper tuned but did not list them) and,
+    exactly, the Mushroom coverage counts reported for Asso by Belohlavek & Trnecka (2015,
+    Table 4: 2 / 6 / 36 factors for 25 / 50 / 75%, never 95%).
+  - `algorithm="grecond"` (Belohlavek & Vychodil 2010). Reproduces the factor counts of
+    Belohlavek & Trnecka (2015, Table 4) for Mushroom (3 / 7 / 24 / 62 / 120 against 3 / 7 /
+    24 / 63 / 120 for 25 / 50 / 75 / 95 / 100%) and Tic-tac-toe (5 / 12 / 19 / 28 / 32,
+    exact); Chess is one higher at partial coverage and exact at 124 for the full cover (the
+    paper's Chess matrix has one more column).
+  - `n_components=None` stops by itself (GreConD at an exact cover, Asso when nothing improves
+    its cover function), and `coverage` stops at a fraction of the ones covered.
+  Test data: UCI Mushroom and Tic-tac-toe (via PMLB), bundled in `tests/data/`.
 - Split–merge moves (`split_merge=True`, 10 proposals per sweep; an int sets the number, False
   turns them off). Each proposal changes two components at once and is accepted with the exact
   Metropolis–Hastings probability:
@@ -44,7 +61,7 @@
   `component_detection` to simulate this model.
 
 - Option keywords for published methods, and `boolmf.presets` of named keyword sets that
-  reproduce them (`BoolMF(n_components=L, **presets.rukat2017)`):
+  reproduce them (`BayesianBooleanMF(n_components=L, **presets.rukat2017)`):
   - `activation_prior` / `activation_level` and `membership_level` (with `membership_prior`
     now also accepting a float or `"empirical"`): Beta rates per component, shared by all
     components, or per sample / per feature, or a fixed rate;
@@ -92,6 +109,10 @@
   published overestimate at 20% flips.
 
 ### Changed
+- The Bayesian estimator is now `BayesianBooleanMF` (it was `BoolMF`, alias `BooleanMF`), and
+  `BooleanMF` is the new standard estimator, following scikit-learn's pairs such as
+  `GaussianMixture` / `BayesianGaussianMixture`. The module `boolmf._estimator` is now
+  `boolmf._bayesian`. `get_feature_names_out` returns `bayesianbooleanmf0`, ... .
 - With a fixed `n_components`, every slot in use is reported as a component, and the slot
   resets used for births under the Indian buffet process no longer apply.
 - Nested-factors benchmark (500 samples, 20 true components, 8 chains; seeds 0 and 1), before →

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "boolmf"
 dynamic = ["version"]
-description = "Bayesian nonparametric Boolean matrix factorization with a scikit-learn-compatible API."
+description = "Boolean matrix factorization (standard and Bayesian nonparametric) with a scikit-learn API."
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]

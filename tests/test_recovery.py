@@ -5,7 +5,7 @@ import warnings
 import numpy as np
 import pytest
 
-from boolmf import BoolMF
+from boolmf import BayesianBooleanMF
 from boolmf.datasets import make_boolean_factors
 from boolmf.matching import jaccard_matrix
 from boolmf.metrics import confusion_table
@@ -17,7 +17,7 @@ def test_recovery_moderate_simulation():
                                     random_state=0, return_truth=True)
     with warnings.catch_warnings():
         warnings.simplefilter("error")                 # no convergence warnings expected
-        model = BoolMF(n_chains=4, n_jobs=-1, max_sweeps=3000, random_state=0).fit(X)
+        model = BayesianBooleanMF(n_chains=4, n_jobs=-1, max_sweeps=3000, random_state=0).fit(X)
     assert model.n_components_ == 6
     members, active = model.binarize_components()
     robust = model.component_flags_ == "robust"
