@@ -7,7 +7,7 @@ import warnings
 
 from sklearn.utils.estimator_checks import parametrize_with_checks
 
-from boolmf import BayesianBooleanMF, BooleanMF
+from boolmf import BayesianBooleanMF, BetaMixture, BooleanMF
 
 SHORT = dict(n_chains=2, max_sweeps=40, burn_in=20, n_draws=10, thin=1, random_state=0)
 
@@ -17,6 +17,8 @@ SHORT = dict(n_chains=2, max_sweeps=40, burn_in=20, n_draws=10, thin=1, random_s
      BooleanMF(3, algorithm="grecond", binarize=0.5),
      BooleanMF(3, algorithm="panda", binarize=0.5),
      BayesianBooleanMF(binarize=0.5, **SHORT),
+     BayesianBooleanMF(2, binarize=0.5, membership_prior=BetaMixture(), membership_level="feature",
+                       activation_level="sample", init="asso", split_merge=False, **SHORT),
      BayesianBooleanMF(binarize=0.5, detection_effects=("sample",),
                        background_effects=("sample",), **SHORT),
      BayesianBooleanMF(binarize=0.5, likelihood="noisy_or",

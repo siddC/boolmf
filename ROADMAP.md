@@ -22,7 +22,7 @@ checks pass.
 - Per-component detection rates, with `likelihood="noisy_or"` (done)
 - The original samplers of the cited papers as options, each checked by reproducing the
   paper's published results: Rukat et al. 2017 (done), Wood et al. 2006, Meeds et al. 2007
-  births and Rukat & Yau 2019 (done), Wagala et al. 2026
+  births and Rukat & Yau 2019 (done), Wagala et al. 2026 (done)
 - Standard Boolean matrix factorization as its own estimator, `BooleanMF`, next to
   `BayesianBooleanMF`: Asso, GreConD and PANDA+ (done). MEBF
   (Wan et al. 2020) was dropped: its published results come from code that differs from the

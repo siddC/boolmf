@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import numba
 import numpy as np
+from scipy.special import betaln, expit
 
 from .._model import loglik_tables
 from ..diagnostics import ess, geweke, segment_rhat
@@ -33,7 +34,8 @@ class ChainConfig:
     thin: object                      # "auto" or int
     rhat_threshold: float
     n_init: int
-    store_draws: bool = True
+    store_draws: object = True         # True, False, or the most draws to keep (evenly spaced)
+    track_map: bool = False           # keep the draw with the highest log posterior
     store_entries: bool = True
     check_every: int = 100
     min_burn: int = 500
@@ -79,6 +81,7 @@ class ChainResult:
     draw_slot_rates: list = None      # per draw (slots, detection rate per slot) or None
     draw_spread: np.ndarray = None    # (n_draws, 3) logit-scale spreads: sample detection,
     #                                   sample background, component detection
+    map_state: object = None          # (log posterior, Z, U, a, b) with track_map
 
 
 def _csr(B):
@@ -123,9 +126,11 @@ def initial_state(V, cfg, rng, init):
 class LevelPrior:
     """Prior on activation (or membership) probabilities.
 
-    kind "ibp" (activations only), "beta" (rate ~ Beta(a, b)) or "fixed" (rate = value);
-    level "component" (one rate per component), "shared" (one rate for all components) or
-    "row" (one rate per sample, or per feature).
+    kind "ibp" (activations only), "beta" (rate ~ Beta(a, b)), "fixed" (rate = value) or
+    "mixture" (rate ~ Beta(b1, b2) if psi = 1 else Beta(c1, c2), psi ~ Bernoulli(w),
+    w ~ Beta(d1, d2), with ``mix`` = (b1, b2, c1, c2, d1, d2)); level "component" (one rate per
+    component), "shared" (one rate for all components) or "row" (one rate per sample, or per
+    feature).
     """
 
     kind: str = "beta"
@@ -133,9 +138,73 @@ class LevelPrior:
     a: float = 1.0
     b: float = 1.0
     value: float = 0.5
+    mix: tuple = None
 
 
-def _level_rates(prior, X, cols, rng, n_rows):
+def _units(prior, X, cols, n_rows):
+    """(ones, trials) per rate unit of a binary matrix X (rows x slots) over ``cols``."""
+    Xc = X[:, cols]
+    m = len(cols)
+    if prior.level == "component":
+        return Xc.sum(0, dtype=np.int64), np.full(m, n_rows)
+    if prior.level == "shared":
+        return np.array([int(Xc.sum())]), np.array([n_rows * m])
+    return Xc.sum(1, dtype=np.int64), np.full(Xc.shape[0], m)
+
+
+def _mixture_rates(prior, ones, trials, state, rng):
+    """One Gibbs pass over a two-component Beta mixture prior: the rates given the current
+    indicators psi, then the weight w given psi, then psi given the rates and w (the order of
+    Wagala et al. 2026, Algorithm 1). ``state`` holds psi and w between sweeps."""
+    b1, b2, c1, c2, d1, d2 = prior.mix
+    if "psi" not in state:
+        state["psi"] = rng.random(ones.shape[0]) < 0.5
+    psi = state["psi"]
+    rates = np.where(psi, rng.beta(b1 + ones, b2 + trials - ones),
+                     rng.beta(c1 + ones, c2 + trials - ones))
+    rates = np.clip(rates, 1e-300, 1 - 1e-16)
+    w = rng.beta(d1 + psi.sum(), d2 + psi.size - psi.sum())
+    w = min(max(w, 1e-300), 1 - 1e-16)
+    l1 = _log_beta_pdf(rates, b1, b2) + np.log(w)
+    l0 = _log_beta_pdf(rates, c1, c2) + np.log1p(-w)
+    state["psi"] = rng.random(rates.size) < expit(l1 - l0)
+    state["w"] = w
+    return rates
+
+
+def _log_posterior(cfg, ll, Z, U, pi, rho, apri, mpri, mix_z, mix_u, a, b, free):
+    """Unnormalized log posterior of a finite model with global rates (the constant of a rate
+    prior given as a Beta distribution is left out; it does not change which draw is best)."""
+    lp = ll
+    for prior, x in ((cfg.prior_a, a), (cfg.prior_b, b)):
+        if prior.fixed is None:
+            lp += float(prior.logpdf(x))
+    zprior = apri or LevelPrior("beta", "component", 1.0, 1.0)
+    for X, p, prior, state in ((Z[:, free], pi[:, free], zprior, mix_z),
+                               (U[:, free], rho[:, free], mpri, mix_u)):
+        p = np.clip(p, 1e-300, 1 - 1e-16)
+        lp += float((X * np.log(p) + (1 - X) * np.log1p(-p)).sum())
+        if prior.kind in ("fixed", "ibp"):
+            continue
+        rates = p[0, :] if prior.level == "component" else (
+            p[:, 0] if prior.level == "row" else p[:1, 0])
+        if prior.kind == "beta":
+            lp += float(_log_beta_pdf(rates, prior.a, prior.b).sum())
+        else:
+            b1, b2, c1, c2, d1, d2 = prior.mix
+            psi, w = state["psi"], state["w"]
+            lp += float(np.where(psi, _log_beta_pdf(rates, b1, b2),
+                                 _log_beta_pdf(rates, c1, c2)).sum())
+            lp += float(psi.sum() * np.log(w) + (psi.size - psi.sum()) * np.log1p(-w))
+            lp += float(_log_beta_pdf(np.array([w]), d1, d2)[0])
+    return lp
+
+
+def _log_beta_pdf(x, a, b):
+    return (a - 1) * np.log(x) + (b - 1) * np.log1p(-x) - betaln(a, b)
+
+
+def _level_rates(prior, X, cols, rng, n_rows, state=None):
     """Draw the probabilities of a binary matrix X (rows x slots) restricted to ``cols``.
 
     Returns an array broadcastable to (rows, len(cols)): (1, m) or (rows, 1) or (1, 1).
@@ -143,6 +212,12 @@ def _level_rates(prior, X, cols, rng, n_rows):
     m = len(cols)
     if prior.kind == "fixed":
         return np.full((1, 1), prior.value)
+    if prior.kind == "mixture":
+        ones, trials = _units(prior, X, cols, n_rows)
+        rates = _mixture_rates(prior, ones, trials, state, rng)
+        if prior.level == "component":
+            return rates[None, :]
+        return rates[:, None] if prior.level == "row" else rates.reshape(1, 1)
     Xc = X[:, cols]
     if prior.level == "component":
         ones = Xc.sum(0, dtype=np.int64)
@@ -185,6 +260,11 @@ def run_chain(V, cfg, seed, init):
     elif cfg.births != "slots":
         rho = np.full((1, K), mpri.a / (mpri.a + mpri.b))
     alpha = cfg.alpha_prior.fixed if cfg.alpha_prior.fixed is not None else 1.0
+    mix_z, mix_u = {}, {}                      # mixture-prior indicators and weights
+    best_map = None                            # (log posterior, Z, U, a, b) of the best draw
+    keep_every = 1
+    if cfg.store_draws is not True and cfg.store_draws and isinstance(cfg.n_draws, int):
+        keep_every = max(1, -(-cfg.n_draws // int(cfg.store_draws)))
 
     total_cap = cfg.max_sweeps
     trace = {m: [] for m in MONITORED}
@@ -253,12 +333,12 @@ def run_chain(V, cfg, seed, init):
         if cfg.births != "slots":
             pass                                  # updated inside the collapsed sweep
         elif mpri.kind != "fixed":
-            if mpri.level == "component":
+            if mpri.level == "component" and mpri.kind == "beta":
                 rho = rng.beta(ra + nmem, rb + F - nmem).astype(np.float64)[None, :]
             else:                               # shared or per feature, over the used slots
                 cols = np.flatnonzero((nmem > 0) & (nact > 0) | ~free) \
                     if cfg.nonparametric else np.arange(K)
-                rho = np.broadcast_to(_level_rates(mpri, U, cols, rng, F),
+                rho = np.broadcast_to(_level_rates(mpri, U, cols, rng, F, mix_u),
                                       (F if mpri.level == "row" else 1, K)).copy()
         if cfg.births != "slots":
             pass
@@ -272,7 +352,7 @@ def run_chain(V, cfg, seed, init):
             pi[0, free] = pi_f
         elif apri is None or apri.kind != "fixed":
             prior_z = apri or LevelPrior("beta", "component", 1.0, 1.0)
-            rates = _level_rates(prior_z, Z, np.flatnonzero(free), rng, n)
+            rates = _level_rates(prior_z, Z, np.flatnonzero(free), rng, n, mix_z)
             pi = np.ones((n if prior_z.level == "row" else 1, K))
             pi[:, free] = rates
 
@@ -337,7 +417,11 @@ def run_chain(V, cfg, seed, init):
         lam = engine.slot_rates(used)
         if lam is not None:
             d_slot_rates.append((used.astype(np.int32), lam.astype(np.float64)))
-        if cfg.store_draws:
+        if cfg.track_map:
+            lp = _log_posterior(cfg, ll, Z, U, pi, rho, apri, mpri, mix_z, mix_u, a, b, free)
+            if best_map is None or lp > best_map[0]:
+                best_map = (lp, Z.copy(), U.copy(), a, b)
+        if cfg.store_draws and n_kept % keep_every == 0:
             draw = {
                 "slots": used.astype(np.int32),
                 "U": np.packbits(U[:, used], axis=0),
@@ -374,6 +458,7 @@ def run_chain(V, cfg, seed, init):
         draw_sample_rates={k: np.asarray(v, np.float32) for k, v in d_srates.items() if v},
         draw_spread=np.asarray(d_spread, float) if d_spread else None,
         draw_slot_rates=d_slot_rates or None,
+        map_state=best_map,
     )
     if cfg.store_entries:
         res.explained = (explained.astype(np.float32) / n_kept)
