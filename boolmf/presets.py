@@ -132,7 +132,10 @@ rank 2-10). The posterior mode equals the true rank in 74%, 67% and 59% of runs 
 published, but less than the one extra code reported at 20%, and at ranks 5-10 the rank is
 almost always exact. At ranks 2-4 (dense codes, factor density 0.45-0.54) a run often keeps one
 or two extra codes that split a true code, a local mode that one-at-a-time updates leave slowly,
-so "reliably recovers" holds only from rank 5 up.
+so "reliably recovers" holds only from rank 5 up. The authors' code, run on the same data, is
+also exact from rank 5 up but merges codes at ranks 2-3 and never overestimates at 20% flips,
+so the published claims are not reproduced by it either. Fits where codes were split often
+raise the redundant-components warning (see ``redundant_components_``).
 """
 
 PRESETS = {"rukat2017": rukat2017, "rukat_yau2019": rukat_yau2019, "wood2006": wood2006}

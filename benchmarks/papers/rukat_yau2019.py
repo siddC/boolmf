@@ -12,6 +12,15 @@ samples and discards the first 100. The paper shows no figures, only these claim
 The number of latent dimensions of a sample is the number of codes with at least one carrier
 and one member; the posterior mode over the kept samples is compared with L.
 
+Comparison with the authors' code (``lom``, run on the same 81 datasets, patched only so that
+current numba compiles it): the posterior mode equals the true rank in 23/27, 20/27 and 21/27
+runs at 0%, 10% and 20% flips (this preset: 20, 18 and 16 of 27), with mean excess -0.07, -0.11
+and -0.15 (this preset: +0.22, +0.44, +0.63). Both are exact in almost every run from rank 5
+up. At ranks 2-3 the authors' code merges codes (-1) where this preset splits them (+1 or +2):
+its prior on new codes, (alpha / N)^(L + L') / (L + L')!, and its limit of 2 new codes per row
+suppress births. Neither reproduces the published overestimate of about one code at 20% flips;
+the authors' code does not overestimate at all.
+
 Run: python benchmarks/papers/rukat_yau2019.py [--repeats 3]
 """
 import argparse

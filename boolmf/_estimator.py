@@ -83,6 +83,38 @@ def _two_means_threshold(x):
     return t
 
 
+def _redundant_components(components, activations, flags, threshold=0.9):
+    """Robust components that the OR model could do without (probabilities > 0.5).
+
+    Two kinds, both usually a component the chain split in two or duplicated:
+
+    * ``("carriers", k, l, jaccard)`` / ``("members", k, l, jaccard)``: components k and l have
+      nearly the same carriers (or members). With the same carriers, one component whose
+      members are the union of theirs covers the same entries; likewise with the same members.
+    * ``("covered", k, -1, fraction)``: at least ``threshold`` of the entries component k covers
+      are also covered by other components, so dropping it barely changes the fit.
+    """
+    idx = np.flatnonzero(np.asarray(flags) == "robust")
+    A = np.asarray(activations)[:, idx] > 0.5            # samples x robust components
+    B = np.asarray(components)[idx] > 0.5                # robust components x features
+    out = []
+    for a in range(len(idx)):
+        for b in range(a + 1, len(idx)):
+            for side, M in (("carriers", A.T), ("members", B)):
+                inter = np.count_nonzero(M[a] & M[b])
+                union = np.count_nonzero(M[a] | M[b])
+                if union and inter / union >= threshold:
+                    out.append((side, int(idx[a]), int(idx[b]), inter / union))
+                    break
+    if len(idx) > 1:
+        count = A.astype(np.int32) @ B.astype(np.int32)   # components covering each entry
+        for a in range(len(idx)):
+            sub = count[np.ix_(A[:, a], B[a])]
+            if sub.size and np.mean(sub >= 2) >= threshold:
+                out.append(("covered", int(idx[a]), -1, float(np.mean(sub >= 2))))
+    return out
+
+
 def _bayes_fdr_threshold(p, fdr):
     """Smallest threshold whose calls have expected FDR = mean(1 - p) <= fdr."""
     s = np.sort(np.asarray(p, float).ravel())[::-1]
@@ -257,6 +289,13 @@ class BoolMF(TransformerMixin, BaseEstimator):
         ``"anchor"``, ``"robust"``, ``"low_support"`` or ``"not_robust"`` per component.
     robustness_ : ndarray
         Fraction of good chains in which each component appears.
+    redundant_components_ : list of tuple
+        Signs that robust components are redundant, as ``(kind, k, l, score)``:
+        ``("carriers", k, l, jaccard)`` or ``("members", k, l, jaccard)`` when components k and
+        l have carriers (or members, probability above 0.5) with Jaccard similarity of at least
+        0.9, and ``("covered", k, -1, fraction)`` when at least 90% of the entries component k
+        covers are covered by other components. Either usually marks a component that the
+        sampler split in two or duplicated; a warning is raised when the list is not empty.
     prevalence_ : ndarray
         Mean activation of each component across samples.
     detection_rate_, background_rate_ : float
@@ -871,6 +910,20 @@ class BoolMF(TransformerMixin, BaseEstimator):
         elif nonparametric and np.median(self.n_components_draws_) > 0.8 * n_free:
             warnings.warn(
                 "more than 80% of component slots are in use; increase max_components.",
+                stacklevel=3)
+
+        self.redundant_components_ = _redundant_components(
+            self.components_, self.activations_, self.component_flags_)
+        if self.redundant_components_:
+            kind, k, l, _ = self.redundant_components_[0]
+            first = (f"component {k} is almost entirely covered by the others"
+                     if kind == "covered" else f"components {k} and {l} share their {kind}")
+            warnings.warn(
+                f"{len(self.redundant_components_)} sign(s) of redundant components (first: "
+                f"{first}; see redundant_components_). Under the OR model such components add "
+                "almost nothing to the fit, so they usually mark one component split in two or "
+                "duplicated, a mode that one-at-a-time updates leave slowly. Split-merge moves "
+                "(births='slots', split_merge=True) or more chains usually remove it.",
                 stacklevel=3)
 
         # ---- entry-level summaries and draws ---------------------------------------------

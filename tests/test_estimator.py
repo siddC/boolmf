@@ -264,3 +264,24 @@ def test_per_component_rates_noisy_or():
     assert m2.detection_rate_per_sample_.shape == (150,)
     assert m2.background_rate_per_sample_.shape == (150,)
     assert np.isfinite(m2.detection_rate_per_component_[m2.component_flags_ == "robust"]).all()
+
+
+def test_redundant_components_are_detected():
+    from boolmf._estimator import _redundant_components
+
+    A = np.zeros((40, 4))
+    A[:20, 0] = A[:20, 1] = 1              # 0 and 1: same carriers, different members
+    A[20:, 2] = 1
+    A[20:30, 3] = 1                        # 3 lies inside 2 ...
+    B = np.zeros((4, 30))
+    B[0, :10] = B[1, 10:20] = 1
+    B[2, 20:] = 1
+    B[3, 22:28] = 1                        # ... on both sides, so 2 covers all it covers
+    flags = np.array(["robust"] * 4)
+    found = {(kind, k, l) for kind, k, l, _ in _redundant_components(B, A, flags)}
+    assert found == {("carriers", 0, 1), ("covered", 3, -1)}
+    flags[3] = "low_support"               # only robust components are checked
+    found = {(kind, k, l) for kind, k, l, _ in _redundant_components(B, A, flags)}
+    assert found == {("carriers", 0, 1)}
+    A[:10, 1] = 0                          # carriers of 0 and 1 now differ enough
+    assert _redundant_components(B, A, flags) == []
