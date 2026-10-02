@@ -101,15 +101,16 @@ def component_leakage(model):
     x = (V == 1).astype(float)
     M, Q = model.components_, model.activations_
     K = M.shape[0]
+
+    def term(k):                      # log P(component k does not cover the entry)
+        return np.log1p(-np.clip(np.outer(Q[:, k], M[k]), 0, 1 - 1e-12))
+
     log_none = np.zeros(V.shape)
-    terms = []
     for k in range(K):
-        t = np.log1p(-np.clip(np.outer(Q[:, k], M[k]), 0, 1 - 1e-12))
-        terms.append(t)
-        log_none += t
+        log_none += term(k)
     out = np.full(K, np.nan)
-    for k in range(K):
-        others_none = np.exp(log_none - terms[k])
+    for k in range(K):                # recomputed rather than stored: K arrays of n x F
+        others_none = np.exp(log_none - term(k))
         w = np.outer(1.0 - Q[:, k], M[k]) * others_none * obs
         d = w.sum()
         if d > 0:
