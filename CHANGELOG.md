@@ -3,6 +3,13 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `checkpoint_dir` and `checkpoint_every` for `BayesianBooleanMF`: each chain saves its complete
+  state (sampler state, random generator, traces and accumulated draws) every
+  `checkpoint_every` sweeps, written atomically, and a refit with the same data, settings and
+  int `random_state` resumes from it. A resumed fit is identical to an uninterrupted one (tested
+  by interrupting a chain mid-run); a checkpoint from other data or settings raises
+  `ValueError`; finished chains remove their file. Long real-data fits were being lost to
+  process restarts.
 - `presets.wagala2026`, the BBMF of Wagala, Samur & Parmigiani (2026), and what it needs:
   - `BetaMixture`, a two-component Beta mixture prior for `membership_prior` or
     `activation_prior` (fixed `n_components`): each probability comes from Beta(b1, b2) or
