@@ -33,6 +33,11 @@ checks pass.
 **Gate 2:** fits to the real matrix converge (R-hat of at most 1.01 across chains) and score at
 least as well as the NMF baseline on held-out entries.
 
+Status (GENOMiCUS-4k, 200 and 500 genomes, `benchmarks/genomicus4k.py`): held-out scores pass
+(log-likelihood -0.115 against NMF's best -0.148 at 500 genomes; -0.123 against -0.199 at 200).
+Convergence fails: R-hat of the rates 1.07-2.8 depending on the variant, of the log-likelihood
+about 3, because the chains keep adding components (hundreds) after 4,000 sweeps.
+
 After v0.2, CI adds `macos-latest` and `windows-latest` for every supported Python version.
 
 ## v0.3: scale

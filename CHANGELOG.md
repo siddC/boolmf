@@ -3,6 +3,15 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `benchmarks/genomicus4k.py`: the v0.2 real-data gate on the GENOMiCUS-4k E. coli pangenome
+  (data not distributed; paths are passed in). Held-out entries are scored against a masked
+  NMF baseline at its validation-chosen rank. The Bayesian model predicts better in every
+  variant (500 genomes: log-likelihood -0.115, AUC 0.986, against -0.148 and 0.982), but the
+  chains do not converge in 4,000 sweeps: they keep adding components (about 690 per draw at
+  500 genomes), and the R-hat of the log-likelihood stays near 3. Per-genome rates help most
+  (rate R-hat 1.18 / 1.07). With the core genome added, the inner core works as a fixed anchor
+  component (held-out log-likelihood -0.093); as a learned anchor it absorbs the soft core and
+  about a quarter of the accessory genes and predicts worse.
 - `presets.wagala2026`, the BBMF of Wagala, Samur & Parmigiani (2026), and what it needs:
   - `BetaMixture`, a two-component Beta mixture prior for `membership_prior` or
     `activation_prior` (fixed `n_components`): each probability comes from Beta(b1, b2) or
