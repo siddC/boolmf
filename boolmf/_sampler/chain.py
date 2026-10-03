@@ -1,5 +1,7 @@
 """One MCMC chain for BayesianBooleanMF: initialization, burn-in, sampling and draw storage."""
 
+import os
+import pickle
 from dataclasses import dataclass, field
 
 import numba
@@ -36,6 +38,9 @@ class ChainConfig:
     n_init: int
     store_draws: object = True         # True, False, or the most draws to keep (evenly spaced)
     track_map: bool = False           # keep the draw with the highest log posterior
+    checkpoint_dir: str = None        # save the chain's state here and resume from it
+    checkpoint_every: int = 200       # sweeps between checkpoints
+    data_key: str = ""                # fingerprint of the data, to refuse foreign checkpoints
     store_entries: bool = True
     check_every: int = 100
     min_burn: int = 500
@@ -229,6 +234,61 @@ def _level_rates(prior, X, cols, rng, n_rows, state=None):
     return rng.beta(prior.a + ones, prior.b + m - ones)[:, None]
 
 
+_STATE = ("rng", "Z", "U", "engine", "rho", "pi", "alpha", "mix_z", "mix_u", "best_map", "trace",
+          "burn", "converged", "thin", "Ubar", "Zbar", "explained", "predictive", "draws",
+          "d_rates", "d_alpha", "d_nact", "d_ll", "d_srates", "d_spread", "d_slot_rates", "n_kept",
+          "sm_stats", "birth_stats", "sweep", "sampling_start", "passes")
+_FORMAT = 1
+
+
+def _checkpoint_path(cfg, seed):
+    if not cfg.checkpoint_dir:
+        return None
+    return os.path.join(cfg.checkpoint_dir, f"chain-{int(seed)}.pkl")
+
+
+def _canon(v):
+    """A description of a setting that is stable across processes (no memory addresses)."""
+    if isinstance(v, np.ndarray):
+        return ("array", v.dtype.str, v.shape, v.tobytes().hex())
+    if isinstance(v, (list, tuple)):
+        return tuple(_canon(x) for x in v)
+    if isinstance(v, dict):
+        return tuple((k, _canon(x)) for k, x in sorted(v.items()))
+    if hasattr(v, "dist") and hasattr(v, "args") and hasattr(v, "kwds"):   # frozen scipy
+        return ("dist", v.dist.name, _canon(v.args), _canon(v.kwds))
+    if hasattr(v, "__dict__"):
+        return (type(v).__name__, _canon(vars(v)))
+    if isinstance(v, (np.floating, np.integer, np.bool_)):
+        return v.item()
+    return v
+
+
+def _config_key(cfg):
+    """Everything that defines the chain except where and how often it is checkpointed."""
+    skip = {"checkpoint_dir", "checkpoint_every", "n_threads", "verbose"}
+    return repr(_canon({k: v for k, v in vars(cfg).items() if k not in skip}))
+
+
+def _save_checkpoint(path, cfg, seed, state):
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        pickle.dump({"format": _FORMAT, "seed": int(seed), "config": _config_key(cfg),
+                     "state": state}, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, path)                      # atomic: a crash never leaves half a file
+
+
+def _load_checkpoint(path, cfg, seed):
+    with open(path, "rb") as fh:
+        saved = pickle.load(fh)
+    if saved.get("format") != _FORMAT or saved.get("seed") != int(seed) \
+            or saved.get("config") != _config_key(cfg):
+        raise ValueError(
+            f"checkpoint {path} was written for different data or settings; remove it or use "
+            "another checkpoint_dir.")
+    return saved["state"]
+
+
 def run_chain(V, cfg, seed, init):
     """Run one chain to completion and return its summaries and draws."""
     if cfg.n_threads:
@@ -288,7 +348,19 @@ def run_chain(V, cfg, seed, init):
     sampling_start = None
     passes = 0
 
+    ckpt = _checkpoint_path(cfg, seed)
+    if ckpt is not None and os.path.exists(ckpt):
+        state = _load_checkpoint(ckpt, cfg, seed)
+        (rng, Z, U, engine, rho, pi, alpha, mix_z, mix_u, best_map, trace, burn, converged, thin,
+         Ubar, Zbar, explained, predictive, draws, d_rates, d_alpha, d_nact, d_ll, d_srates,
+         d_spread, d_slot_rates, n_kept, sm_stats, birth_stats, sweep, sampling_start,
+         passes) = (state[k] for k in _STATE)
+    resumed_at = sweep
+
     while True:
+        if ckpt is not None and sweep != resumed_at and sweep % cfg.checkpoint_every == 0:
+            local = locals()
+            _save_checkpoint(ckpt, cfg, seed, {k: local[k] for k in _STATE})
         # ---- one Gibbs sweep ---------------------------------------------------------
         engine.begin_sweep(Z, U)
         if cfg.births != "slots":
@@ -440,6 +512,8 @@ def run_chain(V, cfg, seed, init):
         if n_kept >= cfg.n_draws:
             break
 
+    if ckpt is not None and os.path.exists(ckpt):
+        os.remove(ckpt)                        # the chain is complete
     res = ChainResult(
         seed=int(seed),
         trace={m: np.asarray(v, float) for m, v in trace.items()},

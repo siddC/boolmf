@@ -24,7 +24,7 @@ from ._sampler.logsurv import project_activations_ls
 from ._sampler.splitmerge import MOVE_NAMES
 from .diagnostics import ess, rhat
 from .matching import match_components
-from .utils.validation import row_seeds, to_binary_int8
+from .utils.validation import matrix_fingerprint, row_seeds, to_binary_int8
 
 DEFAULT_SPLIT_MERGE = 10          # proposals per sweep when split_merge=True
 
@@ -315,6 +315,15 @@ or None
     store_draws : bool or int, default=True
         Keep bit-packed binary draws (needed by ``transform`` and ``get_draws``). An int keeps
         at most that many per chain, evenly spaced over the kept draws.
+    checkpoint_dir : str, path or None, default=None
+        Directory where each chain saves its complete state every ``checkpoint_every``
+        sweeps (one file per chain, written atomically). Fitting again with the same data,
+        settings and an int ``random_state`` resumes every chain from its last checkpoint, so
+        a long fit survives an interrupted process; the result is the same as an
+        uninterrupted fit. A chain's file is removed when it finishes. A checkpoint written for
+        other data or settings raises ``ValueError``.
+    checkpoint_every : int, default=200
+        Sweeps between checkpoints.
     random_state : int, RandomState instance or None, default=None
     n_jobs : int or None, default=None
         Number of chains run in parallel (joblib).
@@ -417,6 +426,8 @@ or None
         robustness_threshold=0.5,
         min_support=3,
         store_draws=True,
+        checkpoint_dir=None,
+        checkpoint_every=200,
         random_state=None,
         n_jobs=None,
         verbose=0,
@@ -456,6 +467,8 @@ or None
         self.robustness_threshold = robustness_threshold
         self.min_support = min_support
         self.store_draws = store_draws
+        self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_every = checkpoint_every
         self.random_state = random_state
         self.n_jobs = n_jobs
         self.verbose = verbose
@@ -618,6 +631,12 @@ or None
                 if self.n_components is None:
                     raise ValueError(f"a BetaMixture {name} needs a fixed n_components.")
                 getattr(self, name).params()
+        _int("checkpoint_every", 1)
+        if self.checkpoint_dir is not None:
+            if self.random_state is None or not isinstance(self.random_state, numbers.Integral):
+                raise ValueError("checkpoint_dir needs an int random_state, so that a refit "
+                                 "can find each chain's checkpoint.")
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
         if not (isinstance(self.store_draws, (bool, np.bool_)) or (
                 isinstance(self.store_draws, numbers.Integral) and self.store_draws >= 1)):
             raise ValueError("store_draws must be a bool or a positive int.")
@@ -716,6 +735,9 @@ or None
             n_init=n_init,
             store_draws=self.store_draws if isinstance(self.store_draws, (bool, np.bool_))
             else int(self.store_draws),
+            checkpoint_dir=None if self.checkpoint_dir is None else os.fspath(self.checkpoint_dir),
+            checkpoint_every=int(self.checkpoint_every),
+            data_key=matrix_fingerprint(V_fit) + repr(self._init_key(init)),
             track_map=(not nonparametric and not na
                        and not (self._levels("detection_effects")
                                 or self._levels("background_effects"))),
@@ -745,6 +767,12 @@ or None
             results = [_transpose_result(r) for r in results]
         self._postprocess(V, results, na, nonparametric, n_free)
         return self
+
+    @staticmethod
+    def _init_key(init):
+        if isinstance(init, tuple):
+            return tuple(matrix_fingerprint(np.ascontiguousarray(x, dtype=np.int8)) for x in init)
+        return init
 
     def _anchor_masks(self, F):
         anchors, learned = [], []
