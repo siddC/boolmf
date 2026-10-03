@@ -3,6 +3,23 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `benchmarks/genomicus4k.py`: the v0.2 real-data gate on the GENOMiCUS-4k E. coli pangenome
+  (data not distributed; paths are passed in). Held-out entries are scored against a masked
+  NMF baseline at its validation-chosen rank. The Bayesian model predicts better in every
+  variant (500 genomes: log-likelihood -0.115, AUC 0.986, against -0.148 and 0.982), but the
+  chains do not converge in 4,000 sweeps: they keep adding components (about 690 per draw at
+  500 genomes), and the R-hat of the log-likelihood stays near 3. Per-genome rates help most
+  (rate R-hat 1.18 / 1.07). With the core genome added, the inner core works as a fixed anchor
+  component (held-out log-likelihood -0.093); as a learned anchor it absorbs the soft core and
+  about a quarter of the accessory genes and predicts worse.
+  On a phylogroup-balanced subsample (`--metadata`: 25 genomes from each of phylogroups A, B1,
+  B2, C, D, E, F and G, 10 from each Shigella species and the 9 clade I genomes; 249 x 4,811)
+  with per-genome rates, 4 chains of 20,000 sweeps do not settle either: the log-likelihood
+  still rises by about 650 per 1,000 sweeps at the end, the component count by about 3 (to
+  about 610), and the chains stay apart (log-likelihood R-hat 2.8 over the last 5,000 sweeps;
+  rates 1.14 / 1.07). Only 14% of one chain's components have a partner in another chain at
+  Jaccard >= 0.8 (members and carriers). The chains agree on prediction: held-out
+  log-likelihood -0.119 to -0.122 per chain (-0.106 pooled) against NMF's best -0.187.
 - `checkpoint_dir` and `checkpoint_every` for `BayesianBooleanMF`: each chain saves its complete
   state (sampler state, random generator, traces and accumulated draws) every
   `checkpoint_every` sweeps, written atomically, and a refit with the same data, settings and
