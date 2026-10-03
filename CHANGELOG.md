@@ -147,6 +147,9 @@
   published overestimate at 20% flips.
 
 ### Changed
+- `component_leakage` (and so `summary()`) no longer keeps one samples x features array per
+  component; on a 500 x 4,811 pangenome fit with 430 components it needed 8.3 GB and ran out of
+  memory. Results are unchanged.
 - `BayesianBooleanMF.fit_transform` now returns `fit(X).transform(X)`, as scikit-learn's
   transformer contract expects; the activation probabilities from the chains themselves stay
   in `activations_`.
