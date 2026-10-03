@@ -49,8 +49,22 @@ raising the log-likelihood; the data support hundreds of components (more than t
 genomes at 200), as gene gains along a phylogeny would. With the fixed anchor most soft-core
 genes (610 of 724) go to two components carried by 88% and 59% of the genomes.
 
+Phylogroup-balanced subsample (``--metadata``; 249 genomes x 4,811 accessory genes), per-genome
+rates, 4 chains of 20,000 sweeps (``--sweeps 20000 --variant sample``):
+  NMF rank 20, isotonic            -0.187 / 0.974 / 0.931
+  BayesianBooleanMF, each chain    -0.119 to -0.122 / 0.987 / 0.961   pooled -0.106 / 0.991 / 0.966
+  It does not settle: from sweep 10,000 to 20,000 the log-likelihood rises by about 650 per
+  1,000 sweeps in every chain and the component count by about 3 (to about 610); over the last
+  5,000 sweeps R-hat is 2.8 for the log-likelihood, 1.45 for the component count and 1.14 / 1.07
+  for the rates. Chains agree on prediction (mean absolute difference of held-out predictive
+  probabilities 0.028; per-genome detection rates correlate at 0.95) but not on components:
+  only 14% of one chain's components (2% of the entries they cover) have a partner in another
+  chain with member and carrier Jaccard >= 0.8. The same entries are covered by different
+  sets of overlapping components.
+
 Run: python benchmarks/genomicus4k.py --accessory P_acc.parquet [--core P_core.parquet]
-     [--genomes 500] [--variant ibp] [--nmf-only]
+     [--genomes 500 | --metadata metadata.parquet] [--variant ibp] [--sweeps 4000]
+     [--checkpoint-dir DIR] [--nmf-only]
 """
 import argparse
 import time
@@ -138,6 +152,25 @@ def nmf_baseline(X, test):
     return k, clipped, isotonic
 
 
+# phylogroup-balanced subsample: 25 per Clermont phylogroup, 10 per Shigella species, clade I
+QUOTA = {**{g: 25 for g in ("A", "B1", "B2", "C", "D", "E", "F", "G")},
+         **{f"Shigella {s}": 10 for s in ("flexneri", "sonnei", "dysenteriae", "boydii")},
+         "cladeI": 9}
+
+
+def balanced_subsample(genomes, metadata, rng):
+    """Column indices of the phylogroup-balanced subsample (metadata only picks genomes; the
+    model sees nothing but the presence/absence matrix)."""
+    import pandas as pd
+
+    md = pd.read_parquet(metadata)
+    md["gid"] = md["genome_id"].astype(str).replace(ALIASES)
+    group = md.drop_duplicates("gid").set_index("gid").reindex(list(genomes))["phylogroup"]
+    group = group.to_numpy()
+    return np.sort(np.concatenate([rng.choice(np.flatnonzero(group == g), q, replace=False)
+                                   for g, q in QUOTA.items()]))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--accessory", required=True)
@@ -147,11 +180,18 @@ def main():
     ap.add_argument("--max-components", type=int, default=900)
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--nmf-only", action="store_true")
+    ap.add_argument("--metadata", help="metadata parquet with genome_id and phylogroup columns: "
+                    "take the phylogroup-balanced subsample instead of --genomes random ones")
+    ap.add_argument("--sweeps", type=int, default=4000)
+    ap.add_argument("--checkpoint-dir")
     args = ap.parse_args()
 
     acc = load(args.accessory)
     rng = np.random.default_rng(0)
-    cols = np.sort(rng.choice(acc.shape[1], args.genomes, replace=False))
+    if args.metadata:
+        cols = balanced_subsample(acc.columns, args.metadata, rng)
+    else:
+        cols = np.sort(rng.choice(acc.shape[1], args.genomes, replace=False))
     Xa = acc.to_numpy(np.int8).T[cols]
     f = Xa.mean(0)
     X = Xa[:, (f >= 0.01) & (f <= 0.99)]
@@ -177,9 +217,12 @@ def main():
     t = time.time()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
+        burn = args.sweeps // 20 if args.sweeps > 4000 else 3000 * args.sweeps // 4000
+        thin = 10 if args.sweeps > 4000 else 1
         m = BayesianBooleanMF(n_chains=4, n_jobs=args.jobs, max_components=args.max_components,
-                              burn_in=3000, n_draws=1000, thin=1, max_sweeps=4000, store_draws=20,
-                              anchor_components=anchors, random_state=0,
+                              burn_in=burn, n_draws=(args.sweeps - burn) // thin, thin=thin,
+                              max_sweeps=args.sweeps, store_draws=20, anchor_components=anchors,
+                              random_state=0, checkpoint_dir=args.checkpoint_dir,
                               **VARIANTS[args.variant]).fit(X, mask=test)
     ll, auc, acc_ = scores(m._predictive_, X, test)
     print(f"BayesianBooleanMF ({args.variant}): ll {ll:.4f} auc {auc:.4f} acc {acc_:.4f} "
