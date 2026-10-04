@@ -3,6 +3,15 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `likelihood_power` for `BayesianBooleanMF`: the coarsened (power) posterior of Miller &
+  Dunson (2019), likelihood^zeta x prior. Every update that sees the likelihood is tempered
+  (memberships, activations, split-merge, collapsed births, global and per-sample rates) and
+  the MAP search uses zeta x log-likelihood; the reported log-likelihood and the predictive
+  probabilities are the model's own. 1.0, the default, is the usual posterior and gives
+  identical fits. On real data the full-likelihood posterior keeps adding components as the
+  data grow; zeta below 1 sets how much misfit is tolerated before a component is added.
+  Checked against the exact tempered posterior of a problem small enough to enumerate. Not
+  yet available with `detection_effects=("component",)`.
 - `benchmarks/genomicus4k.py`: the v0.2 real-data gate on the GENOMiCUS-4k E. coli pangenome
   (data not distributed; paths are passed in). Held-out entries are scored against a masked
   NMF baseline at its validation-chosen rank. The Bayesian model predicts better in every
