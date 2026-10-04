@@ -20,6 +20,8 @@ checks pass.
 - Split–merge moves, so chains stop settling in different modes (done)
 - Per-sample detection and background rates (done)
 - Per-component detection rates, with `likelihood="noisy_or"` (done)
+- Coarsened posterior, `likelihood_power` (Miller & Dunson 2019), so the number of components
+  stops growing with the data when the data are not exactly Boolean (done)
 - The original samplers of the cited papers as options, each checked by reproducing the
   paper's published results: Rukat et al. 2017 (done), Wood et al. 2006, Meeds et al. 2007
   births and Rukat & Yau 2019 (done), Wagala et al. 2026 (done)
