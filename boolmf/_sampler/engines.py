@@ -2,6 +2,9 @@
 
 ``CountEngine``: rates shared by all components (global or per sample). The state is the count
 matrix C and the likelihood enters through tables T[row, count]; serves both likelihoods.
+With ``likelihood_power`` zeta < 1 (a coarsened posterior) every update targets
+likelihood^zeta x prior: the tables and the count histograms behind the rate updates are
+multiplied by zeta. The log-likelihood it reports, and the predictive probabilities, are not.
 
 ``LogSurvEngine``: ``noisy_or`` with per-component detection rates (optionally also per-sample
 detection and background rates). The state is L[i, j] = sum over covering components of
@@ -129,6 +132,7 @@ class CountEngine:
         self.bg_s = SampleRates(n, self.b, cfg.prior_b) \
             if "sample" in cfg.background_effects else None
         self.C = counts_from_state(Z, U)
+        self.power = float(cfg.likelihood_power)
 
     @property
     def per_sample(self):
@@ -148,6 +152,13 @@ class CountEngine:
 
     def begin_sweep(self, Z, U):
         self.T1, self.T0 = self.tables()
+        if self.power != 1.0:
+            self.T1, self.T0 = self.power * self.T1, self.power * self.T0
+
+    def _tempered(self, H1, H0):
+        if self.power == 1.0:
+            return H1, H0
+        return self.power * H1.astype(np.float64), self.power * H0.astype(np.float64)
 
     def update_memberships(self, V, U, logit_rho, act_ptr, act_idx, mask, rng,
                            metropolis=False):
@@ -167,49 +178,51 @@ class CountEngine:
         cfg = self.cfg
         if not self.per_sample:
             H1, H0 = count_histograms(V, self.C, self.K)
+            T1, T0 = self._tempered(H1, H0)
             if cfg.tied_rates:
-                self.a = _tied_rate(H1, H0, cfg.prior_a, cfg.rate_estimation, rng)
+                self.a = _tied_rate(T1, T0, cfg.prior_a, cfg.rate_estimation, rng)
                 self.b = 1.0 - self.a
             elif cfg.rate_estimation == "mle":
                 self.a, self.b = _mle_rates(H1, H0, cfg.prior_a, cfg.prior_b)
             else:
-                self.a, self.b = update_rates(cfg.likelihood, self.a, self.b, H1, H0,
+                self.a, self.b = update_rates(cfg.likelihood, self.a, self.b, T1, T0,
                                               cfg.prior_a, cfg.prior_b, rng)
             return self.a, self.b, histogram_loglik(cfg.likelihood, self.a, self.b, H1, H0)
         n, lik = self.n, self.lik
         H1, H0 = row_histograms(V, self.C, self.K)
+        T1, T0 = self._tempered(H1, H0)
         order = cfg.likelihood == "or_flip"
         zeros, ones = np.zeros(n), np.ones(n)
         bv = self._b_vec()
         if self.det_s is not None:
-            self.det_s.update(lik, 0, bv, H1, H0, bv if order else zeros, ones, rng)
+            self.det_s.update(lik, 0, bv, T1, T0, bv if order else zeros, ones, rng)
             self.a = self.det_s.population_rate
         elif cfg.prior_a.fixed is None:
             lo = float(bv.max()) if order else 0.0
             if order and cfg.prior_a.beta_ab:
                 aa, ab = cfg.prior_a.beta_ab
-                self.a = truncated_beta(rng, aa + H1[:, 1:].sum(), ab + H0[:, 1:].sum(), lo=lo)
+                self.a = truncated_beta(rng, aa + T1[:, 1:].sum(), ab + T0[:, 1:].sum(), lo=lo)
             else:
                 def la(x):
                     if x <= lo:
                         return -np.inf
-                    return rows_loglik(lik, np.full(n, x), bv, H1, H0) + cfg.prior_a.logpdf(x)
+                    return rows_loglik(lik, np.full(n, x), bv, T1, T0) + cfg.prior_a.logpdf(x)
 
                 self.a = slice_sample_unit(la, max(self.a, lo + 1e-9), rng)
         av = self._a_vec()
         if self.bg_s is not None:
-            self.bg_s.update(lik, 1, av, H1, H0, zeros, av if order else ones, rng)
+            self.bg_s.update(lik, 1, av, T1, T0, zeros, av if order else ones, rng)
             self.b = self.bg_s.population_rate
         elif cfg.prior_b.fixed is None:
             hi = float(av.min()) if order else 1.0
             if order and cfg.prior_b.beta_ab:
                 ba, bb = cfg.prior_b.beta_ab
-                self.b = truncated_beta(rng, ba + H1[:, 0].sum(), bb + H0[:, 0].sum(), hi=hi)
+                self.b = truncated_beta(rng, ba + T1[:, 0].sum(), bb + T0[:, 0].sum(), hi=hi)
             else:
                 def lb(x):
                     if x >= hi:
                         return -np.inf
-                    return rows_loglik(lik, av, np.full(n, x), H1, H0) + cfg.prior_b.logpdf(x)
+                    return rows_loglik(lik, av, np.full(n, x), T1, T0) + cfg.prior_b.logpdf(x)
 
                 self.b = slice_sample_unit(lb, min(self.b, hi - 1e-9), rng)
         return self.a, self.b, float(rows_loglik(lik, av, self._b_vec(), H1, H0))

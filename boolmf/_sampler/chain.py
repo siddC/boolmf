@@ -61,6 +61,7 @@ class ChainConfig:
     exact_birth_members: bool = True  # False: one Gibbs pass from 0 over new memberships
     detection_effects: tuple = ()     # subset of ("sample", "component")
     background_effects: tuple = ()    # ("sample",) for per-sample background rates
+    likelihood_power: float = 1.0     # zeta < 1: coarsened posterior, likelihood^zeta x prior
     verbose: int = 0
 
 
@@ -490,7 +491,8 @@ def run_chain(V, cfg, seed, init):
         if lam is not None:
             d_slot_rates.append((used.astype(np.int32), lam.astype(np.float64)))
         if cfg.track_map:
-            lp = _log_posterior(cfg, ll, Z, U, pi, rho, apri, mpri, mix_z, mix_u, a, b, free)
+            lp = _log_posterior(cfg, cfg.likelihood_power * ll, Z, U, pi, rho, apri, mpri,
+                                mix_z, mix_u, a, b, free)
             if best_map is None or lp > best_map[0]:
                 best_map = (lp, Z.copy(), U.copy(), a, b)
         if cfg.store_draws and n_kept % keep_every == 0:
@@ -552,6 +554,8 @@ def _collapsed_sweep(cfg, V, Z, U, engine, alpha, rho, mpri, harmonic, stats, rn
     K = Z.shape[1]
     p = float(rho.flat[0])
     T1, T0 = loglik_tables(cfg.likelihood, engine.a, engine.b, K + cfg.max_new + 1)
+    if cfg.likelihood_power != 1.0:
+        T1, T0 = cfg.likelihood_power * T1, cfg.likelihood_power * T0
     births = BIRTH_ENUMERATE if cfg.births == "enumerate" else BIRTH_METROPOLIS
     collapsed_rows(V, Z, U, engine.C, T1, T0, float(alpha), p, births, cfg.max_new,
                    cfg.metropolis, np.uint64(rng.integers(0, 2**63 - 1)), stats,

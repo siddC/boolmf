@@ -190,6 +190,18 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
         members are split across two components with the same carriers is a local mode that
         one-at-a-time updates rarely leave; split-merge moves (planned for v0.2) address this,
         so ``"or_flip"`` is the default for now.
+    likelihood_power : float in (0, 1], default=1.0
+        The power zeta of the likelihood in the target, likelihood^zeta x prior. 1 is the
+        usual posterior. Below 1 it is a coarsened (power) posterior (Miller & Dunson 2019,
+        Robust Bayesian inference via coarsening, JASA 114: 1113-1125): every observed entry
+        counts as zeta of an entry, so structure must be supported by more data before the
+        model adds a component for it. Real data are never exactly Boolean, and with the full
+        likelihood the number of components keeps growing with the data; coarsening sets how
+        much misfit is tolerated. Miller & Dunson write zeta = a / (a + N) for N observed
+        entries and choose a from where the fit stops improving as a grows. The reported
+        log-likelihood (``log_likelihood_trace_``) and the predictive probabilities are
+        those of the model itself, not tempered. Not available with
+        ``detection_effects=("component",)``.
     anchor_components : list of AnchorComponent or None, default=None
         Components active in every sample, for example a core-genome component.
     binarize : float or None, default=None
@@ -394,6 +406,7 @@ or None
         *,
         max_components="auto",
         likelihood="or_flip",
+        likelihood_power=1.0,
         anchor_components=None,
         binarize=None,
         detection_effects=(),
@@ -435,6 +448,7 @@ or None
         self.n_components = n_components
         self.max_components = max_components
         self.likelihood = likelihood
+        self.likelihood_power = likelihood_power
         self.anchor_components = anchor_components
         self.binarize = binarize
         self.detection_effects = detection_effects
@@ -526,6 +540,13 @@ or None
             _int("n_components", 1)
         if self.max_components != "auto":
             _int("max_components", 1)
+        if not (isinstance(self.likelihood_power, numbers.Real)
+                and not isinstance(self.likelihood_power, bool)
+                and 0.0 < self.likelihood_power <= 1.0):
+            raise ValueError(f"likelihood_power must be in (0, 1]; got {self.likelihood_power!r}.")
+        if self.likelihood_power != 1.0 and "component" in self._levels("detection_effects"):
+            raise NotImplementedError(
+                "likelihood_power < 1 with detection_effects=('component',) is not implemented.")
         for name, allowed in (("detection_effects", ("sample", "component")),
                               ("background_effects", ("sample",))):
             levels = self._levels(name)
@@ -748,6 +769,7 @@ or None
             n_split_merge=self._n_split_merge(),
             detection_effects=self._levels("detection_effects"),
             background_effects=self._levels("background_effects"),
+            likelihood_power=float(self.likelihood_power),
             activation_prior=act_spec,
             membership_prior=mem_spec,
             tied_rates=bool(self.tied_rates),
