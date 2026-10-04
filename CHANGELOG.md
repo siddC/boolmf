@@ -162,6 +162,8 @@
   published overestimate at 20% flips.
 
 ### Changed
+- The `ValueError` for an unknown `init` now lists `'asso'` among the accepted values and
+  shows the value given.
 - `component_leakage` (and so `summary()`) no longer keeps one samples x features array per
   component; on a 500 x 4,811 pangenome fit with 430 components it needed 8.3 GB and ran out of
   memory. Results are unchanged.

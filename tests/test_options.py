@@ -29,6 +29,8 @@ def test_option_validation(small_data):
         BayesianBooleanMF(update="annealed").fit(X)
     with pytest.raises(ValueError):
         BayesianBooleanMF(membership_prior="guess", split_merge=False, n_components=3).fit(X)
+    with pytest.raises(ValueError, match="'asso' or a .* got 'nndsvd'"):
+        BayesianBooleanMF(init="nndsvd").fit(X)
 
 
 @pytest.mark.parametrize("params", [

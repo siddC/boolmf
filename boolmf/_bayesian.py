@@ -562,8 +562,8 @@ or None
                 raise ValueError(f"{name} must be a non-negative number; got {v!r}.")
         if not (isinstance(self.init, tuple)
                 or self.init in ("random", "uniform", "empty", "nmf", "asso")):
-            raise ValueError("init must be 'random', 'uniform', 'empty', 'nmf' or a "
-                             "(members, activations) tuple.")
+            raise ValueError("init must be 'random', 'uniform', 'empty', 'nmf', 'asso' or a "
+                             f"(members, activations) tuple; got {self.init!r}.")
         for name, allowed in (("membership_level", ("component", "shared", "feature")),
                               ("activation_level", ("component", "shared", "sample")),
                               ("rate_estimation", ("bayes", "mle")),
