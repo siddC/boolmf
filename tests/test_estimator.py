@@ -161,6 +161,34 @@ def test_inits(small_data):
     assert np.all(_best_jaccard(truth["members"], members[robust]) >= 0.9)
 
 
+def test_nmf_start_keeps_the_top_of_three_clusters(small_data):
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import NMF
+
+    from boolmf._bayesian import _top_cluster
+
+    x = np.r_[np.zeros(50), np.full(30, 0.4), np.full(20, 1.0)] + np.linspace(0, 0.01, 100)
+    assert np.array_equal(np.flatnonzero(_top_cluster(x, 3, 0)), np.arange(80, 100))
+    y = np.r_[np.zeros(50), np.full(30, 0.8), np.full(20, 1.0)] + np.linspace(0, 0.01, 100)
+    assert np.array_equal(np.flatnonzero(_top_cluster(y, 2, 0)), np.arange(50, 100))
+    assert not _top_cluster(np.ones(10), 3, 0).any()
+    assert np.array_equal(_top_cluster(np.r_[0.0, 0.0, 1.0], 3, 0), [False, False, True])
+
+    X, _ = small_data
+    V = X.astype(np.int8)
+    m = BayesianBooleanMF(init="nmf", init_params={"n_components": 4}, random_state=0)
+    members, acts = m._initial_state(V, 10)
+    nmf = NMF(n_components=4, init="nndsvda", max_iter=500, random_state=0)
+    W = nmf.fit_transform(X.astype(np.float32))
+    for k in range(4):                         # the phylon binarization, column by column
+        km = KMeans(3, n_init="auto", random_state=0).fit(nmf.components_[k][:, None])
+        assert np.array_equal(members[k], km.labels_ == np.argmax(km.cluster_centers_[:, 0]))
+        km = KMeans(3, n_init="auto", random_state=0).fit(W[:, k][:, None])
+        assert np.array_equal(acts[:, k], km.labels_ == np.argmax(km.cluster_centers_[:, 0]))
+    with pytest.raises(ValueError, match="binarize_clusters"):
+        BayesianBooleanMF(init="nmf", init_params={"binarize_clusters": 1}, **FAST).fit(X)
+
+
 def test_rate_priors(small_data):
     X, _ = small_data
     background = stats.truncnorm(-2, 2, loc=0.02, scale=0.01)

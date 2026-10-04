@@ -100,22 +100,21 @@ class AnchorComponent:
     membership: str = "fixed"
 
 
-def _two_means_threshold(x):
-    """Split a 1-D array into two groups by 2-means and return the midpoint threshold."""
-    x = np.asarray(x, float)
-    if x.size == 0 or np.all(x == x[0]):
-        return np.inf
-    lo, hi = x.min(), x.max()
-    t = (lo + hi) / 2
-    for _ in range(50):
-        a, b = x[x <= t], x[x > t]
-        if a.size == 0 or b.size == 0:
-            break
-        t_new = (a.mean() + b.mean()) / 2
-        if abs(t_new - t) < 1e-12:
-            break
-        t = t_new
-    return t
+def _top_cluster(x, n_clusters, random_state):
+    """Entries of a 1-D array in the k-means cluster with the highest center.
+
+    ``sklearn.cluster.KMeans(n_clusters, n_init="auto")`` on the values; the top cluster is set
+    to 1 and the others to 0. With fewer distinct values than clusters, one cluster per
+    distinct value; a constant array gives no entries.
+    """
+    from sklearn.cluster import KMeans
+
+    x = np.asarray(x, float).reshape(-1, 1)
+    k = min(int(n_clusters), np.unique(x).size)
+    if k < 2:
+        return np.zeros(x.shape[0], bool)
+    km = KMeans(n_clusters=k, n_init="auto", random_state=random_state).fit(x)
+    return km.labels_ == int(np.argmax(km.cluster_centers_[:, 0]))
 
 
 def _redundant_components(components, activations, flags, threshold=0.9):
@@ -312,14 +311,19 @@ or None
         Starting state for the chains (default ``"random"``: a few sparse random components).
         ``"uniform"`` sets every entry of every component to 0 or 1 with probability 1/2;
         ``"empty"`` starts with no components. ``"nmf"`` fits
-        ``sklearn.decomposition.NMF(**init_params)`` and binarizes each component. ``"asso"``
+        ``sklearn.decomposition.NMF(**init_params)`` (NNDSVDa start unless ``init_params``
+        sets ``init``) and binarizes each component and each column of its activations by
+        k-means on the values (``KMeans(n_clusters=3, n_init="auto")``): the cluster with the
+        highest center becomes 1, the other two 0. This is the binarization used for NMF
+        phylons; it favors precision over recall. ``init_params["binarize_clusters"]`` sets
+        the number of clusters (2 splits each component in two). ``"asso"``
         starts every chain from the Asso factorization (``BooleanMF(algorithm="asso")``,
         threshold 0.5 and unit weights unless ``init_params`` sets ``threshold``,
         ``positive_weight`` or ``negative_weight``; missing entries count as 0). A tuple gives
         members (n_init, n_features) and activations (n_samples, n_init) directly.
     init_params : dict or None, default=None
-        Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"``, or for Asso
-        when ``init="asso"``.
+        Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"`` (plus
+        ``binarize_clusters``, see ``init``), or for Asso when ``init="asso"``.
     robustness_threshold : float, default=0.5
         Fraction of chains a component must appear in to be flagged robust.
     min_support : float, default=3
@@ -841,6 +845,10 @@ or None
             from sklearn.decomposition import NMF
 
             params = dict(self.init_params or {})
+            n_clusters = params.pop("binarize_clusters", 3)
+            if not (isinstance(n_clusters, numbers.Integral) and n_clusters >= 2):
+                raise ValueError(f"init_params['binarize_clusters'] must be an int >= 2; got "
+                                 f"{n_clusters!r}.")
             params.setdefault("n_components", min(n_free, max(2, int(np.sqrt(min(V.shape))))))
             params.setdefault("init", "nndsvda")
             params.setdefault("max_iter", 500)
@@ -852,8 +860,9 @@ or None
                 warnings.simplefilter("ignore")
                 W = nmf.fit_transform(Xf)
             H = nmf.components_
-            members = np.stack([H[k] > _two_means_threshold(H[k]) for k in range(H.shape[0])])
-            acts = np.stack([W[:, k] > _two_means_threshold(W[:, k]) for k in range(W.shape[1])],
+            seed = params.get("random_state")
+            members = np.stack([_top_cluster(H[k], n_clusters, seed) for k in range(H.shape[0])])
+            acts = np.stack([_top_cluster(W[:, k], n_clusters, seed) for k in range(W.shape[1])],
                             axis=1)
             return (members, acts)
         return "random"

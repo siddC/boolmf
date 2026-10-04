@@ -171,6 +171,11 @@
   published overestimate at 20% flips.
 
 ### Changed
+- `init="nmf"` binarizes the NMF start the way NMF phylons are binarized: each component
+  (and each column of its activations) is split by k-means with 3 clusters
+  (`KMeans(n_clusters=3, n_init="auto")`) and only the cluster with the highest center is
+  kept. This favors precision over recall. It was a two-means split;
+  `init_params={"binarize_clusters": 2}` gives a two-cluster split.
 - The `ValueError` for an unknown `init` now lists `'asso'` among the accepted values and
   shows the value given.
 - `component_leakage` (and so `summary()`) no longer keeps one samples x features array per
