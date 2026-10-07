@@ -62,6 +62,7 @@ class ChainConfig:
     detection_effects: tuple = ()     # subset of ("sample", "component")
     background_effects: tuple = ()    # ("sample",) for per-sample background rates
     likelihood_power: float = 1.0     # zeta < 1: coarsened posterior, likelihood^zeta x prior
+    population: str = ""              # settings of the population moves ("" = independent)
     verbose: int = 0
 
 
@@ -290,8 +291,40 @@ def _load_checkpoint(path, cfg, seed):
     return saved["state"]
 
 
+@dataclass
+class Member:
+    """What population moves (``population``) see of a running chain, after its split-merge
+    moves: the state (Z, U and the count matrix C, all changed in place), the chain's
+    likelihood tables (tempered) and its Beta priors on the free slots."""
+
+    Z: np.ndarray
+    U: np.ndarray
+    engine: object
+    free: np.ndarray
+    zprior: tuple
+    uprior: tuple
+
+
 def run_chain(V, cfg, seed, init):
     """Run one chain to completion and return its summaries and draws."""
+    steps = chain_steps(V, cfg, seed, init)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+def chain_steps(V, cfg, seed, init, population=False, resume=None):
+    """One chain as a generator; its return value (``StopIteration.value``) is the
+    ``ChainResult``.
+
+    Alone (``population=False``) it never yields and saves its own checkpoints. In a
+    population it yields ``("moves", Member)`` once per sweep, after the split-merge moves and
+    before the component probabilities are redrawn, so other chains can propose changes to its
+    components; at a checkpoint it yields ``("checkpoint", bytes)`` (its pickled state) instead
+    of writing a file, and ``resume`` restarts it from such bytes.
+    """
     if cfg.n_threads:
         numba.set_num_threads(max(1, min(cfg.n_threads, numba.config.NUMBA_NUM_THREADS)))
     rng = np.random.default_rng(seed)
@@ -349,19 +382,27 @@ def run_chain(V, cfg, seed, init):
     sampling_start = None
     passes = 0
 
-    ckpt = _checkpoint_path(cfg, seed)
+    ckpt = None if population else _checkpoint_path(cfg, seed)
+    state = pickle.loads(resume) if resume is not None else None
     if ckpt is not None and os.path.exists(ckpt):
         state = _load_checkpoint(ckpt, cfg, seed)
+    if state is not None:
         (rng, Z, U, engine, rho, pi, alpha, mix_z, mix_u, best_map, trace, burn, converged, thin,
          Ubar, Zbar, explained, predictive, draws, d_rates, d_alpha, d_nact, d_ll, d_srates,
          d_spread, d_slot_rates, n_kept, sm_stats, birth_stats, sweep, sampling_start,
          passes) = (state[k] for k in _STATE)
     resumed_at = sweep
+    save_state = ckpt is not None or (population and bool(cfg.checkpoint_dir))
 
     while True:
-        if ckpt is not None and sweep != resumed_at and sweep % cfg.checkpoint_every == 0:
+        if save_state and sweep != resumed_at and sweep % cfg.checkpoint_every == 0:
             local = locals()
-            _save_checkpoint(ckpt, cfg, seed, {k: local[k] for k in _STATE})
+            state = {k: local[k] for k in _STATE}
+            if ckpt is not None:
+                _save_checkpoint(ckpt, cfg, seed, state)
+            else:
+                yield ("checkpoint", pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL))
+            del state, local
         # ---- one Gibbs sweep ---------------------------------------------------------
         engine.begin_sweep(Z, U)
         if cfg.births != "slots":
@@ -400,6 +441,13 @@ def run_chain(V, cfg, seed, init):
                 ((apri.a, apri.b) if apri is not None else (1.0, 1.0))
             engine.split_merge(V, Z, U, free, zprior, (ra, rb), cfg.n_split_merge,
                                cfg.n_launch, rng, sm_stats)
+            nmem = U.sum(0, dtype=np.int64)
+            nact = Z.sum(0, dtype=np.int64)
+        if population:
+            # pi and rho are redrawn below from the (possibly changed) state, as after split-merge
+            zp = (alpha / Kf, 1.0) if cfg.nonparametric else \
+                ((apri.a, apri.b) if apri is not None else (1.0, 1.0))
+            yield ("moves", Member(Z, U, engine, free, zp, (ra, rb)))
             nmem = U.sum(0, dtype=np.int64)
             nact = Z.sum(0, dtype=np.int64)
 

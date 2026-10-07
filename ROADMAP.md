@@ -18,6 +18,8 @@ checks pass.
 ## v0.2: real data
 
 - Split–merge moves, so chains stop settling in different modes (done)
+- Population moves between chains (transplant, delete, crossover), so a chain can adopt
+  components another chain found (done)
 - Per-sample detection and background rates (done)
 - Per-component detection rates, with `likelihood="noisy_or"` (done)
 - Coarsened posterior, `likelihood_power` (Miller & Dunson 2019), so the number of components
