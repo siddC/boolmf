@@ -19,10 +19,10 @@ from ._model import (
     loglik_tables,
 )
 from ._sampler.chain import ChainConfig, LevelPrior, run_chain
-from ._sampler.population import MOVE_NAMES as POPULATION_MOVE_NAMES
-from ._sampler.population import PopulationConfig, run_population
 from ._sampler.kernels import project_activations
 from ._sampler.logsurv import project_activations_ls
+from ._sampler.population import MOVE_NAMES as POPULATION_MOVE_NAMES
+from ._sampler.population import PopulationConfig, run_population
 from ._sampler.splitmerge import MOVE_NAMES
 from .diagnostics import ess, rhat
 from .matching import match_components
