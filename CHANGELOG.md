@@ -3,6 +3,18 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `boolmf.consensus`: robust components from every stored draw, and a convergence check on
+  them. `robust_components(draws)` finds the components present in at least half of all draws
+  and in at least two chains (cell Jaccard >= 0.5 between draws), and returns their membership
+  and activation probabilities (given the component is present), their support overall and
+  per chain, and `coverage()` / `reconstruct(detection, background)`. `robust_stability`
+  splits every chain's draws into windows and reports how many of the last window's robust
+  components were already robust in each earlier window. On real data the log-likelihood and
+  the component count keep drifting through a layer of small transient components while the
+  robust components no longer change; on the GENOMiCUS-4k balanced subsample (zeta 0.8,
+  population moves) 89% of the last window's 113 robust components were already robust
+  2,250 sweeps earlier, while the log-likelihood R-hat was 1.9. `BayesianBooleanMF` gains
+  `robust_components()` and `robust_stability()` over its stored draws.
 - `population_moves` and `population_params` for `BayesianBooleanMF`: the chains run in
   lockstep and every `population_moves` sweeps propose moves that use the other chains'
   components (evolutionary Monte Carlo, Liang & Wong 2000; Jasra, Stephens & Holmes 2007):

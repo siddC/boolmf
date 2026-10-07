@@ -44,6 +44,24 @@ def _transpose_result(r):
     return r
 
 
+
+class _LazyDraws:
+    """One chain's stored draws as a sequence of (Z, U), unpacked on access."""
+
+    def __init__(self, draws, n, F, n_anchor):
+        self._d, self._n, self._F, self._na = draws, n, F, n_anchor
+
+    def __len__(self):
+        return len(self._d)
+
+    def __getitem__(self, t):
+        d = self._d[t]
+        keep = np.asarray(d["slots"]) >= self._na
+        Z = np.unpackbits(d["Z"], axis=0, count=self._n).astype(bool)[:, keep]
+        U = np.unpackbits(d["U"], axis=0, count=self._F).astype(bool)[:, keep]
+        return Z, U
+
+
 def _is_real(value):
     return isinstance(value, numbers.Real) and not isinstance(value, bool)
 
@@ -1449,6 +1467,50 @@ or None
             else:
                 raise ValueError("kind must be 'components' or 'activations'.")
             yield out
+
+    def _chain_draws(self):
+        """Stored draws grouped by chain, unpacked lazily: list of sequences of (Z, U), anchor
+        slots left out."""
+        check_is_fitted(self, "components_")
+        if not self._draws_:
+            raise ValueError("no stored draws; fit with store_draws=True (or an int).")
+        n, F, na = self._n_train_samples_, self.components_.shape[1], self._n_anchor_
+        chains = {}
+        for d in self._draws_:
+            chains.setdefault(d["chain"], []).append(d)
+        return [_LazyDraws(chains[c], n, F, na) for c in sorted(chains)]
+
+    def robust_components(self, **kwargs):
+        """Components present in most stored draws, with their membership and activation
+        probabilities (``boolmf.consensus.robust_components``; keyword arguments are passed on,
+        ``min_size`` defaults to ``min_support``).
+
+        Unlike ``components_``, which matches each chain's slot means, this uses every stored
+        draw, so a component counts as robust only if most draws of at least two chains
+        contain it.
+
+        Returns
+        -------
+        boolmf.consensus.RobustComponents
+        """
+        from .consensus import robust_components
+
+        kwargs.setdefault("min_size", int(np.ceil(self.min_support)))
+        return robust_components(self._chain_draws(), **kwargs)
+
+    def robust_stability(self, n_windows=4, **kwargs):
+        """Window-to-window stability of the robust components
+        (``boolmf.consensus.robust_stability``): a convergence check on the robust layer when
+        the log-likelihood and the component count keep drifting.
+
+        Returns
+        -------
+        list of dict, one per window
+        """
+        from .consensus import robust_stability
+
+        kwargs.setdefault("min_size", int(np.ceil(self.min_support)))
+        return robust_stability(self._chain_draws(), n_windows=n_windows, **kwargs)
 
     def summary(self):
         """One row per component: flag, robustness, prevalence, support, integrity, leakage.
