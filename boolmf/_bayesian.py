@@ -19,6 +19,8 @@ from ._model import (
     loglik_tables,
 )
 from ._sampler.chain import ChainConfig, LevelPrior, run_chain
+from ._sampler.population import MOVE_NAMES as POPULATION_MOVE_NAMES
+from ._sampler.population import PopulationConfig, run_population
 from ._sampler.kernels import project_activations
 from ._sampler.logsurv import project_activations_ls
 from ._sampler.splitmerge import MOVE_NAMES
@@ -298,6 +300,27 @@ or None
         carriers contain the other's). They let chains leave states that single-variable Gibbs
         updates cannot, such as two components merged into one. True makes 10 proposals per
         sweep, an int sets the number, False (or 0) turns them off.
+    population_moves : int, default=0
+        Sweeps between rounds of population moves; 0 runs the chains independently.
+        Otherwise the chains run in lockstep in one process (``n_jobs`` is ignored) and every
+        ``population_moves`` sweeps propose moves that use the other chains' components: a
+        component of another chain copied into an empty slot (transplant) or a component that
+        another chain also has removed (delete), and every component inside a region of the
+        data swapped between two chains (crossover; regions are the clusters of a fixed
+        average-linkage clustering of the samples and of the features, Jaccard distance).
+        Each move is a Metropolis-Hastings step whose proposal depends on another chain's
+        current state, so every chain still samples its own posterior (evolutionary Monte
+        Carlo, Liang & Wong 2000; Jasra, Stephens & Holmes 2007). Independent chains of a
+        Boolean factorization often each find part of the structure; these moves let a chain
+        adopt what another found when it raises its posterior. Needs ``births="slots"``,
+        ``n_chains >= 2``, a Beta rate per component on both sides (as split-merge does) and
+        rates shared by components.
+    population_params : dict or None, default=None
+        ``n_transplant`` (transplant or delete proposals per chain and round, default 20),
+        ``n_crossover`` (crossover proposals per round, default 10), ``region_min_size``
+        (default 3), ``region_max_fraction`` (largest region as a fraction of the samples or
+        features, default 0.5) and ``max_region_items`` (no feature regions with more features
+        than this, default 20000).
     rhat_threshold : float, default=1.01
         Convergence cut-off. A warning is raised when the cross-chain R-hat of the detection or
         background rate exceeds ``max(1.05, rhat_threshold)``.
@@ -320,7 +343,8 @@ or None
         starts every chain from the Asso factorization (``BooleanMF(algorithm="asso")``,
         threshold 0.5 and unit weights unless ``init_params`` sets ``threshold``,
         ``positive_weight`` or ``negative_weight``; missing entries count as 0). A tuple gives
-        members (n_init, n_features) and activations (n_samples, n_init) directly.
+        members (n_init, n_features) and activations (n_samples, n_init) directly; a list of
+        ``n_chains`` such tuples gives each chain its own start.
     init_params : dict or None, default=None
         Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"`` (plus
         ``binarize_clusters``, see ``init``), or for Asso when ``init="asso"``.
@@ -393,6 +417,10 @@ or None
     split_merge_acceptance_ : dict
         Share of proposals accepted per move type (split, merge, reallocate, factor,
         unfactor), pooled over chains.
+    population_acceptance_ : dict or None
+        With ``population_moves``: proposals and the share accepted per move type
+        (transplant, delete, crossover_samples, crossover_features), as
+        ``{name: (n_proposed, share_accepted)}``. None otherwise.
     log_likelihood_trace_ : ndarray of shape (n_chains, max_sweeps_run)
         Log-likelihood per sweep, NaN-padded.
     chain_status_ : ndarray of str
@@ -436,6 +464,8 @@ or None
         n_draws=100,
         thin="auto",
         split_merge=True,
+        population_moves=0,
+        population_params=None,
         rhat_threshold=1.01,
         min_ess=400,
         init="random",
@@ -478,6 +508,8 @@ or None
         self.n_draws = n_draws
         self.thin = thin
         self.split_merge = split_merge
+        self.population_moves = population_moves
+        self.population_params = population_params
         self.rhat_threshold = rhat_threshold
         self.min_ess = min_ess
         self.init = init
@@ -534,6 +566,51 @@ or None
             return DEFAULT_SPLIT_MERGE if self.split_merge else 0
         return int(self.split_merge)
 
+    def _population_config(self):
+        params = dict(self.population_params or {})
+        pcfg = PopulationConfig(every=int(self.population_moves))
+        for name in ("n_transplant", "n_crossover", "region_min_size", "max_region_items"):
+            if name in params:
+                v = params.pop(name)
+                if not isinstance(v, numbers.Integral) or isinstance(v, bool) or v < 0:
+                    raise ValueError(f"population_params[{name!r}] must be an int >= 0; "
+                                     f"got {v!r}.")
+                setattr(pcfg, name, int(v))
+        if "region_max_fraction" in params:
+            v = params.pop("region_max_fraction")
+            if not isinstance(v, numbers.Real) or isinstance(v, bool) or not 0 < v <= 1:
+                raise ValueError("population_params['region_max_fraction'] must be in (0, 1]; "
+                                 f"got {v!r}.")
+            pcfg.region_max_fraction = float(v)
+        if params:
+            raise ValueError(f"population_params does not take {sorted(params)}.")
+        return pcfg
+
+    def _check_population(self):
+        v = self.population_moves
+        if not isinstance(v, numbers.Integral) or isinstance(v, bool) or v < 0:
+            raise ValueError(f"population_moves must be an int >= 0; got {v!r}.")
+        if self.population_params is not None and not isinstance(self.population_params, dict):
+            raise ValueError("population_params must be a dict or None.")
+        self._population_config()
+        if v == 0:
+            return
+        if self.n_chains < 2:
+            raise ValueError("population_moves needs n_chains >= 2.")
+        if self.births != "slots":
+            raise ValueError("population_moves needs births='slots'.")
+        if "component" in self._levels("detection_effects"):
+            raise NotImplementedError(
+                "population_moves with detection_effects=('component',) is not implemented.")
+        for name, level in (("membership", self.membership_level),
+                            ("activation", self.activation_level)):
+            pri = getattr(self, f"{name}_prior")
+            if level != "component" or isinstance(pri, BetaMixture) \
+                    or isinstance(pri, (numbers.Real, str)) and not isinstance(pri, bool):
+                raise ValueError(
+                    f"population_moves needs a Beta {name} rate per component; got "
+                    f"{name}_level={level!r} and {name}_prior={pri!r}.")
+
     def _check_params(self):
         def _int(name, lo):
             v = getattr(self, name)
@@ -585,10 +662,17 @@ or None
             v = getattr(self, name)
             if not isinstance(v, numbers.Real) or isinstance(v, bool) or v < 0:
                 raise ValueError(f"{name} must be a non-negative number; got {v!r}.")
-        if not (isinstance(self.init, tuple)
-                or self.init in ("random", "uniform", "empty", "nmf", "asso")):
-            raise ValueError("init must be 'random', 'uniform', 'empty', 'nmf', 'asso' or a "
-                             f"(members, activations) tuple; got {self.init!r}.")
+        if isinstance(self.init, list):
+            if len(self.init) != self.n_chains or not all(
+                    isinstance(x, tuple) and len(x) == 2 for x in self.init):
+                raise ValueError("a list init needs one (members, activations) tuple per chain "
+                                 f"({self.n_chains}); got {len(self.init)} item(s).")
+        elif not (isinstance(self.init, tuple)
+                  or self.init in ("random", "uniform", "empty", "nmf", "asso")):
+            raise ValueError("init must be 'random', 'uniform', 'empty', 'nmf', 'asso', a "
+                             "(members, activations) tuple or a list of them (one per chain); "
+                             f"got {self.init!r}.")
+        self._check_population()
         for name, allowed in (("membership_level", ("component", "shared", "feature")),
                               ("activation_level", ("component", "shared", "sample")),
                               ("rate_estimation", ("bayes", "mle")),
@@ -725,8 +809,11 @@ or None
         flip = self.ibp_side == "features"
         V_fit = np.ascontiguousarray(V.T) if flip else V
         init = self._initial_state(V, n_free)
-        if flip and isinstance(init, tuple):
-            init = (init[1].T, init[0].T)
+        inits = init if isinstance(init, list) else [init] * self.n_chains
+        if flip:
+            inits = [(x[1].T, x[0].T) if isinstance(x, tuple) else x for x in inits]
+        population = int(self.population_moves) > 0
+        pcfg = self._population_config() if population else None
         n_jobs = self.n_jobs if self.n_jobs is not None else 1
         n_workers = os.cpu_count() if n_jobs == -1 else max(1, min(n_jobs, self.n_chains))
         n_threads = max(1, (os.cpu_count() or 1) // max(1, n_workers)) if n_workers > 1 else 0
@@ -762,12 +849,15 @@ or None
             else int(self.store_draws),
             checkpoint_dir=None if self.checkpoint_dir is None else os.fspath(self.checkpoint_dir),
             checkpoint_every=int(self.checkpoint_every),
-            data_key=matrix_fingerprint(V_fit) + repr(self._init_key(init)),
+            data_key=matrix_fingerprint(V_fit) + repr(
+                [self._init_key(x) for x in inits] if isinstance(init, list)
+                else self._init_key(inits[0])),
+            population=repr(vars(pcfg)) if population else "",
             track_map=(not nonparametric and not na
                        and not (self._levels("detection_effects")
                                 or self._levels("background_effects"))),
             store_entries=True,
-            n_threads=n_threads,
+            n_threads=0 if population else n_threads,
             min_support=int(np.ceil(self.min_support)),
             burn_rhat=max(1.05, float(self.rhat_threshold)),
             n_split_merge=self._n_split_merge(),
@@ -786,9 +876,18 @@ or None
             exact_birth_members=self.birth_members == "exact",
             verbose=self.verbose,
         )
-        results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(run_chain)(V_fit, cfg, s, init) for s in chain_seeds
-        )
+        self.population_acceptance_ = None
+        if population:
+            pop_seed = int(np.random.SeedSequence(base_seed + 2).generate_state(1)[0])
+            results, pstats = run_population(V_fit, cfg, chain_seeds, inits, pcfg, pop_seed)
+            self.population_acceptance_ = {
+                name: (int(pstats[0, t]), float(pstats[1, t] / pstats[0, t]) if pstats[0, t]
+                       else float("nan"))
+                for t, name in enumerate(POPULATION_MOVE_NAMES)}
+        else:
+            results = Parallel(n_jobs=n_workers, verbose=0)(
+                delayed(run_chain)(V_fit, cfg, s, x) for s, x in zip(chain_seeds, inits)
+            )
         if flip:
             results = [_transpose_result(r) for r in results]
         self._postprocess(V, results, na, nonparametric, n_free)
@@ -819,9 +918,12 @@ or None
             learned.append(a.membership == "learned")
         return anchors, learned
 
-    def _initial_state(self, V, n_free):
-        if isinstance(self.init, tuple):
-            members, activations = (np.asarray(x) for x in self.init)
+    def _initial_state(self, V, n_free, init=None):
+        init = self.init if init is None else init
+        if isinstance(init, list):
+            return [self._initial_state(V, n_free, x) for x in init]
+        if isinstance(init, tuple):
+            members, activations = (np.asarray(x) for x in init)
             if members.ndim != 2 or members.shape[1] != V.shape[1]:
                 raise ValueError("init members must have shape (n_init, n_features).")
             if activations.shape != (V.shape[0], members.shape[0]):
