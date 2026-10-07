@@ -3,6 +3,22 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `population_moves` and `population_params` for `BayesianBooleanMF`: the chains run in
+  lockstep and every `population_moves` sweeps propose moves that use the other chains'
+  components (evolutionary Monte Carlo, Liang & Wong 2000; Jasra, Stephens & Holmes 2007):
+  copy another chain's component into an empty slot (transplant), remove a component another
+  chain also has (delete), or swap every component inside a region of the data between two
+  chains (crossover; regions are the clusters of a fixed average-linkage clustering of the
+  samples and of the features). Each is a Metropolis-Hastings move whose proposal depends on
+  another chain's current state, held fixed, so every chain keeps sampling its own posterior;
+  checked on a problem small enough to enumerate, with two chains that differ in rates and
+  priors. Independent chains on real data settle in different modes and each finds part of
+  the structure; these moves let a chain adopt what another found when it raises its
+  posterior. With `checkpoint_dir` the whole population is saved to one file and a resumed fit
+  equals an uninterrupted one. `population_acceptance_` reports proposals and acceptance per
+  move type. Needs `births="slots"`, a Beta rate per component on both sides and rates shared
+  by components.
+- `init` accepts a list of `(members, activations)` tuples, one start per chain.
 - `likelihood_power` for `BayesianBooleanMF`: the coarsened (power) posterior of Miller &
   Dunson (2019), likelihood^zeta x prior. Every update that sees the likelihood is tempered
   (memberships, activations, split-merge, collapsed births, global and per-sample rates) and
