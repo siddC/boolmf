@@ -50,13 +50,14 @@ def _log_beta_bernoulli(m, a, b, N):
 
 
 @njit(cache=True)
-def _entry_table_counts(Vb, base, rows, sa_r, sb_r, T1, T0):
+def _entry_table_counts(Vb, base, rows, cols, sa_r, sb_r, T1, T0, fg, G):
     R, M = Vb.shape
-    rs = 1 if T1.shape[0] > 1 else 0
+    rs = 1 if T1.shape[0] > G else 0
     E = np.zeros((R, M, 4))
     for r in range(R):
-        g = rows[r] * rs
+        gb = (rows[r] * rs) * G
         for m in range(M):
+            g = gb + fg[cols[m]]
             v = Vb[r, m]
             if v < 0:
                 continue
@@ -108,11 +109,12 @@ def _entry_table_logsurv(Vb, base, rows, sa_r, sb_r, LB0):
 
 
 @njit(cache=True)
-def block_entry_table(mode, Vb, base, rows, sa_r, sb_r, T1, T0, LB0):
+def block_entry_table(mode, Vb, base, rows, cols, sa_r, sb_r, T1, T0, LB0, fg, G):
     """E[r, m, c]: log-likelihood of block entry (r, m) when it is covered by slot a (bit 0 of
-    c) and/or slot b (bit 1), everything else fixed; 0 for missing entries."""
+    c) and/or slot b (bit 1), everything else fixed; 0 for missing entries. Count form: the
+    table row of entry (i, j) is (i * rs) * G + fg[j] (see ``kernels``)."""
     if mode == 0:
-        return _entry_table_counts(Vb, base, rows, sa_r, sb_r, T1, T0)
+        return _entry_table_counts(Vb, base, rows, cols, sa_r, sb_r, T1, T0, fg, G)
     return _entry_table_logsurv(Vb, base, rows, sa_r, sb_r, LB0)
 
 
@@ -336,7 +338,7 @@ def _count(x):
 
 @njit(cache=True)
 def split_merge_kernel(mode, V, Z, U, STATE, T1, T0, S, LB0, free_idx, zpa, zpb, upa, upb,
-                       n_attempts, n_launch, seed, stats):
+                       n_attempts, n_launch, seed, stats, fg, G):
     """``n_attempts`` proposals on the free slots, in place (STATE = C or L, see module doc).
 
     Move selection: the first slot is uniform over used slots; a merge or reallocation partner
@@ -433,7 +435,7 @@ def split_merge_kernel(mode, V, Z, U, STATE, T1, T0, S, LB0, free_idx, zpa, zpb,
                 Vb[r, m] = V[rows[r], cols[m]]
                 base[r, m] = (STATE[rows[r], cols[m]] - za0[r] * ua0[m] * sa_r[r]
                               - zb0[r] * ub0[m] * sb_r[r])
-        E = block_entry_table(mode, Vb, base, rows, sa_r, sb_r, T1, T0, LB0)
+        E = block_entry_table(mode, Vb, base, rows, cols, sa_r, sb_r, T1, T0, LB0, fg, G)
 
         if move >= FACTOR:
             # Rewrites that keep which entries are covered. Two shapes of a pair (a, b):
@@ -592,19 +594,21 @@ def split_merge_kernel(mode, V, Z, U, STATE, T1, T0, S, LB0, free_idx, zpa, zpb,
 
 
 def split_merge_moves(V, Z, U, C, T1, T0, free, zprior, uprior, n_attempts, n_launch, rng,
-                      stats=None):
+                      stats=None, fg=None):
     """Attempt ``n_attempts`` split, merge, reallocate, factor or unfactor moves, in place.
 
     Count form: C holds the counts, T1, T0 the likelihood tables, one row per sample or one row
     (or a 1-D table) shared by all samples. zprior = (a, b) of the Beta prior on activation
     probabilities (alpha / K and 1 under the Indian buffet process); uprior = (a, b) of the Beta
     prior on membership probabilities. ``stats`` (optional, int64 array of shape (2, N_MOVES))
-    accumulates attempts and acceptances per move type, in the order of ``MOVE_NAMES``.
+    accumulates attempts and acceptances per move type, in the order of ``MOVE_NAMES``. ``fg``
+    (optional): the feature group of every feature, with one table row per (sample, group) or
+    per group.
     """
     if T1.ndim == 1:
         T1, T0 = T1[None, :], T0[None, :]
     _run(0, V, Z, U, C, T1, T0, _DUMMY2, _DUMMY1, free, zprior, uprior, n_attempts, n_launch,
-         rng, stats)
+         rng, stats, fg)
 
 
 def split_merge_moves_logsurv(V, Z, U, L, S, LB0, free, zprior, uprior, n_attempts, n_launch,
@@ -613,7 +617,7 @@ def split_merge_moves_logsurv(V, Z, U, L, S, LB0, free, zprior, uprior, n_attemp
     components of S[i, k] = log(1 - lambda_ik); LB0 = log(1 - background), one entry per sample
     or one shared. S has one row per sample or one shared row."""
     _run(1, V, Z, U, L, _DUMMY2, _DUMMY2, S, LB0, free, zprior, uprior, n_attempts, n_launch,
-         rng, stats)
+         rng, stats, None)
 
 
 _DUMMY1 = np.zeros(1)
@@ -621,10 +625,15 @@ _DUMMY2 = np.zeros((1, 1))
 
 
 def _run(mode, V, Z, U, STATE, T1, T0, S, LB0, free, zprior, uprior, n_attempts, n_launch, rng,
-         stats):
+         stats, fg):
     if stats is None:
         stats = np.zeros((2, N_MOVES), np.int64)
+    if fg is None:
+        fg, G = np.zeros(V.shape[1], np.int64), 1
+    else:
+        fg = np.ascontiguousarray(fg, np.int64)
+        G = int(fg.max()) + 1 if fg.size else 1
     split_merge_kernel(mode, V, Z, U, STATE, T1, T0, S, np.ascontiguousarray(LB0, float),
                        np.flatnonzero(free).astype(np.int64), float(zprior[0]),
                        float(zprior[1]), float(uprior[0]), float(uprior[1]), int(n_attempts),
-                       int(n_launch), np.uint64(rng.integers(0, 2**63 - 1)), stats)
+                       int(n_launch), np.uint64(rng.integers(0, 2**63 - 1)), stats, fg, G)

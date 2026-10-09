@@ -121,21 +121,21 @@ def _col_prior(member, mz, mu, n, F):
 
 def _delta_ll(V, member, rows, cols, dC):
     """Change of the (tempered) log-likelihood of ``member`` when the counts of the block
-    rows x cols change by dC."""
+    rows x cols change by dC (table rows as in ``kernels``: (i * rs) * G + fg[j])."""
     if rows.size == 0 or cols.size == 0:
         return 0.0
     eng = member.engine
+    G = getattr(eng, "G", 1)
+    rs = 1 if eng.T1.shape[0] > G else 0
+    tr = (rows * rs * G)[:, None]
+    if G > 1:
+        tr = tr + eng.fg[cols][None, :]
+    tr = np.broadcast_to(tr, (rows.size, cols.size))
     Vb = V[np.ix_(rows, cols)]
     C0 = eng.C[np.ix_(rows, cols)].astype(np.int64)
     C1 = C0 + dC
-    if eng.T1.shape[0] > 1:
-        T1, T0 = eng.T1[rows], eng.T0[rows]
-        new = np.where(Vb == 1, np.take_along_axis(T1, C1, 1), np.take_along_axis(T0, C1, 1))
-        old = np.where(Vb == 1, np.take_along_axis(T1, C0, 1), np.take_along_axis(T0, C0, 1))
-    else:
-        T1, T0 = eng.T1[0], eng.T0[0]
-        new = np.where(Vb == 1, T1[C1], T0[C1])
-        old = np.where(Vb == 1, T1[C0], T0[C0])
+    new = np.where(Vb == 1, eng.T1[tr, C1], eng.T0[tr, C1])
+    old = np.where(Vb == 1, eng.T1[tr, C0], eng.T0[tr, C0])
     return float(np.sum(np.where(Vb >= 0, new - old, 0.0)))
 
 

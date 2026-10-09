@@ -235,6 +235,15 @@ class BayesianBooleanMF(TransformerMixin, BaseEstimator):
         ``likelihood="noisy_or"``, where each active component delivers each of its features
         independently. With both levels, logit lambda_ik = y_i + g_k. Per-feature rates are
         planned for v0.3.
+    feature_groups : array-like of shape (n_features,) or None, default=None
+        A group label for every feature; the detection and background rates (and their
+        per-sample versions with ``detection_effects`` / ``background_effects``) are then
+        learned separately for each group. Use it when groups of features are observed
+        differently, for example the two halves of a minority-coded presence/absence matrix (a
+        missing gene call lowers the detection rate of presence-coded columns but raises the
+        background rate of absence-coded ones). Priors are shared across groups. Not available
+        with ``detection_effects=("component",)``, ``births`` other than ``"slots"`` or
+        ``ibp_side="features"``.
     detection_prior, background_prior : scipy.stats frozen distribution, float or None
         Priors on the two rates (on the population rate when the rate varies by sample). None
         is Beta(1, 1). A float in (0, 1) fixes the rate. Any distribution with support in
@@ -409,12 +418,18 @@ or None
     prevalence_ : ndarray
         Mean activation of each component across samples.
     detection_rate_, background_rate_ : float
-        Posterior mean rates; the population rate when the rate varies by sample.
+        Posterior mean rates; the population rate when the rate varies by sample. With
+        ``feature_groups``, the mean over groups weighted by observed entries.
+    feature_groups_ : ndarray or None
+        The distinct ``feature_groups`` labels, in the order of the per-group attributes.
+    detection_rate_per_group_, background_rate_per_group_ : ndarray of shape (n_groups,)
+        Posterior mean (population) rate of every feature group; only with ``feature_groups``.
     detection_rate_per_sample_, background_rate_per_sample_ : ndarray of shape (n_samples,)
         Posterior mean rate of each training sample; only when ``"sample"`` is in the matching
         ``*_effects``. ``*_rate_per_sample_interval_`` holds 95% credible intervals, shape
         (n_samples, 2), and ``detection_spread_`` / ``background_spread_`` the posterior mean
-        spread of the logit rates.
+        spread of the logit rates. With ``feature_groups`` the rates have shape
+        (n_samples, n_groups) and the intervals (n_samples, n_groups, 2).
     detection_rate_per_component_ : ndarray of shape (n_components_total,)
         Posterior mean detection rate of each component (at the population level); only with
         ``detection_effects`` containing ``"component"``. ``*_interval_`` holds 95% credible
@@ -461,6 +476,7 @@ or None
         binarize=None,
         detection_effects=(),
         background_effects=(),
+        feature_groups=None,
         detection_prior=None,
         background_prior=None,
         membership_prior=None,
@@ -505,6 +521,7 @@ or None
         self.binarize = binarize
         self.detection_effects = detection_effects
         self.background_effects = background_effects
+        self.feature_groups = feature_groups
         self.detection_prior = detection_prior
         self.background_prior = background_prior
         self.membership_prior = membership_prior
@@ -583,6 +600,19 @@ or None
         if isinstance(self.split_merge, (bool, np.bool_)):
             return DEFAULT_SPLIT_MERGE if self.split_merge else 0
         return int(self.split_merge)
+
+    def _feature_group_codes(self, F):
+        """int64 group code per feature (None without groups); sets feature_groups_."""
+        self.feature_groups_ = None
+        if self.feature_groups is None:
+            return None
+        g = np.asarray(self.feature_groups)
+        if g.ndim != 1 or g.shape[0] != F:
+            raise ValueError(f"feature_groups must have one label per feature ({F}); got shape "
+                             f"{g.shape}.")
+        labels, codes = np.unique(g, return_inverse=True)
+        self.feature_groups_ = labels
+        return codes.astype(np.int64)
 
     def _population_config(self):
         params = dict(self.population_params or {})
@@ -691,6 +721,14 @@ or None
                              "(members, activations) tuple or a list of them (one per chain); "
                              f"got {self.init!r}.")
         self._check_population()
+        if self.feature_groups is not None:
+            if self.births != "slots":
+                raise ValueError("feature_groups needs births='slots'.")
+            if self.ibp_side == "features":
+                raise ValueError("feature_groups does not combine with ibp_side='features'.")
+            if "component" in self._levels("detection_effects"):
+                raise NotImplementedError(
+                    "feature_groups with detection_effects=('component',) is not implemented.")
         for name, allowed in (("membership_level", ("component", "shared", "feature")),
                               ("activation_level", ("component", "shared", "sample")),
                               ("rate_estimation", ("bayes", "mle")),
@@ -802,6 +840,8 @@ or None
             raise ValueError("X has no observed entries.")
 
         anchors, anchor_learned = self._anchor_masks(F)
+        fg_codes = self._feature_group_codes(F)
+        self._fg_codes_ = fg_codes
         na = len(anchors)
         if self.n_components is not None:
             n_free = int(self.n_components)
@@ -871,7 +911,8 @@ or None
                 [self._init_key(x) for x in inits] if isinstance(init, list)
                 else self._init_key(inits[0])),
             population=repr(vars(pcfg)) if population else "",
-            track_map=(not nonparametric and not na
+            feature_groups=fg_codes,
+            track_map=(not nonparametric and not na and fg_codes is None
                        and not (self._levels("detection_effects")
                                 or self._levels("background_effects"))),
             store_entries=True,
@@ -1152,13 +1193,20 @@ or None
             per = [results[c].draw_sample_rates.get(kind) for c in good]
             if per[0] is None:
                 continue
-            per = np.concatenate(per)                          # (draws, n_samples)
+            per = np.concatenate(per)                # (draws, n_samples[, n_groups])
             setattr(self, f"{kind}_rate_per_sample_", per.mean(0).astype(float))
             setattr(self, f"{kind}_rate_per_sample_interval_",
-                    np.quantile(per, [0.025, 0.975], axis=0).T.astype(float))
+                    np.moveaxis(np.quantile(per, [0.025, 0.975], axis=0), 0, -1).astype(float))
             col = 0 if kind == "detection" else 1
             spread = np.concatenate([results[c].draw_spread[:, col] for c in good])
             setattr(self, f"{kind}_spread_", float(spread.mean()))
+        for kind in ("detection", "background"):
+            attr = f"{kind}_rate_per_group_"
+            if hasattr(self, attr):
+                delattr(self, attr)
+            per = [results[c].draw_sample_rates.get(f"group_{kind}") for c in good]
+            if per[0] is not None:
+                setattr(self, attr, np.concatenate(per).mean(0).astype(float))
         for attr in ("detection_rate_per_component_", "detection_rate_per_component_interval_",
                      "detection_component_spread_"):
             if hasattr(self, attr):
@@ -1216,7 +1264,7 @@ or None
                     self._draws_.append({
                         "chain": int(c), "slots": d["slots"], "U": d["U"], "Z": d["Z"],
                         "pi": d["pi"], "a": float(rate_a), "b": float(rate_b),
-                        "lam": d.get("lam"),
+                        "lam": d.get("lam"), "a_g": d.get("a_g"), "b_g": d.get("b_g"),
                     })
         self._n_train_samples_ = n
 
@@ -1267,6 +1315,12 @@ or None
                 s_row = np.log1p(-np.clip(d["lam"], 0.0, 1.0 - 1e-12))
                 z = project_activations_ls(V, U, s_row, float(np.log1p(-d["b"])), logit_pi, ptr,
                                            j.astype(np.int64), s, 40, 20)
+            elif d.get("a_g") is not None:        # feature groups: one table row per group
+                tabs = [loglik_tables(self.likelihood, ag, bg, U.shape[1])
+                        for ag, bg in zip(d["a_g"], d["b_g"])]
+                z = project_activations(V, U, np.stack([t[0] for t in tabs]),
+                                        np.stack([t[1] for t in tabs]), logit_pi, ptr,
+                                        j.astype(np.int64), s, 40, 20, self._fg_codes_)
             else:
                 T1, T0 = loglik_tables(self.likelihood, d["a"], d["b"], U.shape[1])
                 z = project_activations(V, U, T1, T0, logit_pi, ptr, j.astype(np.int64), s, 40,
@@ -1316,14 +1370,23 @@ or None
         M = self.components_
         n, F = Zp.shape[0], M.shape[1]
         a, b = self.detection_rate_, self.background_rate_
+        fgc = getattr(self, "_fg_codes_", None)
+        if fgc is not None:                      # per feature, from its group's rates
+            a = self.detection_rate_per_group_[fgc]
+            b = self.background_rate_per_group_[fgc]
         log_none = np.zeros((n, F))
-        if self.likelihood == "noisy_or":
+        if self.likelihood == "noisy_or" and fgc is not None:
+            weight = np.ones(M.shape[0])
+            per_feature = a
+        elif self.likelihood == "noisy_or":
             weight = getattr(self, "detection_rate_per_component_", np.full(M.shape[0], a))
             weight = np.where(np.isnan(weight), a, weight)
+            per_feature = 1.0
         else:
             weight = np.ones(M.shape[0])
+            per_feature = 1.0
         for k in range(M.shape[0]):
-            q = np.clip(np.outer(Zp[:, k], M[k]) * weight[k], 0.0, 1.0 - 1e-12)
+            q = np.clip(np.outer(Zp[:, k], M[k] * per_feature) * weight[k], 0.0, 1.0 - 1e-12)
             log_none += np.log1p(-q)
         none = np.exp(log_none)
         if self.likelihood == "noisy_or":

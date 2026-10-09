@@ -24,9 +24,9 @@ from .._model import (
 )
 from .kernels import (
     accumulate_entries,
-    count_histograms,
     counts_from_state,
-    row_histograms,
+    group_count_histograms,
+    group_row_histograms,
     update_activations,
     update_memberships,
 )
@@ -117,38 +117,77 @@ def _mle_rates(H1, H0, prior_a, prior_b):
 
 
 class CountEngine:
-    """Rates shared by all components (global, or per sample through ``SampleRates``)."""
+    """Rates shared by all components (global, or per sample through ``SampleRates``).
+
+    With feature groups (``cfg.feature_groups``: a group code 0 .. G - 1 per feature) every rate
+    exists once per group: a global detection and background rate per group, or per-sample rates
+    per group. The tables then have one row per (sample, group), or one per group, and entry
+    (i, j) reads row (i * rs) * G + fg[j] (see ``kernels``). Without groups G = 1.
+    """
 
     def __init__(self, cfg, V, Z, U, rng):
-        n = V.shape[0]
+        n, F = V.shape
         self.cfg, self.n, self.K = cfg, n, Z.shape[1]
         self.lik = likelihood_code(cfg.likelihood)
-        self.a = cfg.prior_a.fixed if cfg.prior_a.fixed is not None else 0.9
-        self.b = cfg.prior_b.fixed if cfg.prior_b.fixed is not None else 0.05
+        fg = getattr(cfg, "feature_groups", None)
+        self.fg = np.zeros(F, np.int64) if fg is None else np.ascontiguousarray(fg, np.int64)
+        self.G = int(self.fg.max()) + 1 if F else 1
+        a0 = cfg.prior_a.fixed if cfg.prior_a.fixed is not None else 0.9
+        b0 = cfg.prior_b.fixed if cfg.prior_b.fixed is not None else 0.05
         if cfg.tied_rates:
-            self.b = 1.0 - self.a
-        self.det_s = SampleRates(n, self.a, cfg.prior_a) \
+            b0 = 1.0 - a0
+        self.ag = np.full(self.G, float(a0))
+        self.bg = np.full(self.G, float(b0))
+        self.det_s = [SampleRates(n, a0, cfg.prior_a) for _ in range(self.G)] \
             if "sample" in cfg.detection_effects else None
-        self.bg_s = SampleRates(n, self.b, cfg.prior_b) \
+        self.bg_s = [SampleRates(n, b0, cfg.prior_b) for _ in range(self.G)] \
             if "sample" in cfg.background_effects else None
+        obs = (V >= 0)
+        w = np.array([obs[:, self.fg == g].sum() for g in range(self.G)], float)
+        self.weights = w / w.sum() if w.sum() > 0 else np.full(self.G, 1.0 / self.G)
         self.C = counts_from_state(Z, U)
         self.power = float(cfg.likelihood_power)
+
+    # population rates: the observed-entry weighted mean over groups (the group's own with G = 1)
+    @property
+    def a(self):
+        return float(self.weights @ self.group_rates()[0])
+
+    @property
+    def b(self):
+        return float(self.weights @ self.group_rates()[1])
+
+    def group_rates(self):
+        """(detection, background) population rate of every group, arrays of shape (G,)."""
+        a = np.array([s.population_rate for s in self.det_s]) if self.det_s is not None \
+            else self.ag.copy()
+        b = np.array([s.population_rate for s in self.bg_s]) if self.bg_s is not None \
+            else self.bg.copy()
+        return a, b
 
     @property
     def per_sample(self):
         return self.det_s is not None or self.bg_s is not None
 
-    def _a_vec(self):
-        return self.det_s.rates if self.det_s is not None else np.full(self.n, self.a)
+    def _a_vec(self, g):
+        return self.det_s[g].rates if self.det_s is not None else np.full(self.n, self.ag[g])
 
-    def _b_vec(self):
-        return self.bg_s.rates if self.bg_s is not None else np.full(self.n, self.b)
+    def _b_vec(self, g):
+        return self.bg_s[g].rates if self.bg_s is not None else np.full(self.n, self.bg[g])
 
     def tables(self):
-        if not self.per_sample:             # one row shared by every sample
-            T1, T0 = loglik_tables(self.cfg.likelihood, self.a, self.b, self.K)
-            return T1[None, :], T0[None, :]
-        return table_rows(self.cfg.likelihood, self._a_vec(), self._b_vec(), self.K)
+        K, G = self.K, self.G
+        if not self.per_sample:             # one row per group shared by every sample
+            lik = self.cfg.likelihood
+            rows = [loglik_tables(lik, self.ag[g], self.bg[g], K) for g in range(G)]
+            return np.stack([r[0] for r in rows]), np.stack([r[1] for r in rows])
+        rows = [table_rows(self.cfg.likelihood, self._a_vec(g), self._b_vec(g), K)
+                for g in range(G)]
+        if G == 1:
+            return rows[0]
+        T1 = np.stack([r[0] for r in rows], axis=1).reshape(self.n * G, K + 2)
+        T0 = np.stack([r[1] for r in rows], axis=1).reshape(self.n * G, K + 2)
+        return T1, T0
 
     def begin_sweep(self, Z, U):
         self.T1, self.T0 = self.tables()
@@ -163,83 +202,100 @@ class CountEngine:
     def update_memberships(self, V, U, logit_rho, act_ptr, act_idx, mask, rng,
                            metropolis=False):
         update_memberships(V, U, self.C, self.T1, self.T0, logit_rho, act_ptr, act_idx, mask,
-                           _seed(rng), metropolis)
+                           _seed(rng), metropolis, self.fg)
 
     def update_activations(self, V, Z, logit_pi, mem_ptr, mem_idx, mask, rng, metropolis=False):
         update_activations(V, Z, self.C, self.T1, self.T0, logit_pi, mem_ptr, mem_idx, mask,
-                           _seed(rng), metropolis)
+                           _seed(rng), metropolis, self.fg)
 
     def split_merge(self, V, Z, U, free, zprior, uprior, n_attempts, n_launch, rng, stats):
         split_merge_moves(V, Z, U, self.C, self.T1, self.T0, free, zprior, uprior, n_attempts,
-                          n_launch, rng, stats)
+                          n_launch, rng, stats, self.fg)
 
     def update_rates(self, V, Z, U, rng):
-        """Update the rates; returns (population detection, population background, loglik)."""
+        """Update the rates of every group; returns (population detection, population
+        background, log-likelihood), the rates averaged over groups by observed entries."""
         cfg = self.cfg
+        ll = 0.0
         if not self.per_sample:
-            H1, H0 = count_histograms(V, self.C, self.K)
-            T1, T0 = self._tempered(H1, H0)
-            if cfg.tied_rates:
-                self.a = _tied_rate(T1, T0, cfg.prior_a, cfg.rate_estimation, rng)
-                self.b = 1.0 - self.a
-            elif cfg.rate_estimation == "mle":
-                self.a, self.b = _mle_rates(H1, H0, cfg.prior_a, cfg.prior_b)
-            else:
-                self.a, self.b = update_rates(cfg.likelihood, self.a, self.b, T1, T0,
-                                              cfg.prior_a, cfg.prior_b, rng)
-            return self.a, self.b, histogram_loglik(cfg.likelihood, self.a, self.b, H1, H0)
+            H1g, H0g = group_count_histograms(V, self.C, self.K, self.fg, self.G)
+            for g in range(self.G):
+                H1, H0 = H1g[g], H0g[g]
+                T1, T0 = self._tempered(H1, H0)
+                if cfg.tied_rates:
+                    self.ag[g] = _tied_rate(T1, T0, cfg.prior_a, cfg.rate_estimation, rng)
+                    self.bg[g] = 1.0 - self.ag[g]
+                elif cfg.rate_estimation == "mle":
+                    self.ag[g], self.bg[g] = _mle_rates(H1, H0, cfg.prior_a, cfg.prior_b)
+                else:
+                    self.ag[g], self.bg[g] = update_rates(cfg.likelihood, self.ag[g], self.bg[g],
+                                                          T1, T0, cfg.prior_a, cfg.prior_b, rng)
+                ll += histogram_loglik(cfg.likelihood, self.ag[g], self.bg[g], H1, H0)
+            return self.a, self.b, float(ll)
         n, lik = self.n, self.lik
-        H1, H0 = row_histograms(V, self.C, self.K)
-        T1, T0 = self._tempered(H1, H0)
+        H1g, H0g = group_row_histograms(V, self.C, self.K, self.fg, self.G)
         order = cfg.likelihood == "or_flip"
         zeros, ones = np.zeros(n), np.ones(n)
-        bv = self._b_vec()
-        if self.det_s is not None:
-            self.det_s.update(lik, 0, bv, T1, T0, bv if order else zeros, ones, rng)
-            self.a = self.det_s.population_rate
-        elif cfg.prior_a.fixed is None:
-            lo = float(bv.max()) if order else 0.0
-            if order and cfg.prior_a.beta_ab:
-                aa, ab = cfg.prior_a.beta_ab
-                self.a = truncated_beta(rng, aa + T1[:, 1:].sum(), ab + T0[:, 1:].sum(), lo=lo)
-            else:
-                def la(x):
-                    if x <= lo:
-                        return -np.inf
-                    return rows_loglik(lik, np.full(n, x), bv, T1, T0) + cfg.prior_a.logpdf(x)
+        for g in range(self.G):
+            H1, H0 = np.ascontiguousarray(H1g[:, g]), np.ascontiguousarray(H0g[:, g])
+            T1, T0 = self._tempered(H1, H0)
+            bv = self._b_vec(g)
+            if self.det_s is not None:
+                self.det_s[g].update(lik, 0, bv, T1, T0, bv if order else zeros, ones, rng)
+            elif cfg.prior_a.fixed is None:
+                lo = float(bv.max()) if order else 0.0
+                if order and cfg.prior_a.beta_ab:
+                    aa, ab = cfg.prior_a.beta_ab
+                    self.ag[g] = truncated_beta(rng, aa + T1[:, 1:].sum(), ab + T0[:, 1:].sum(),
+                                                lo=lo)
+                else:
+                    def la(x, T1=T1, T0=T0, bv=bv, lo=lo):
+                        if x <= lo:
+                            return -np.inf
+                        return rows_loglik(lik, np.full(n, x), bv, T1, T0) + cfg.prior_a.logpdf(x)
 
-                self.a = slice_sample_unit(la, max(self.a, lo + 1e-9), rng)
-        av = self._a_vec()
-        if self.bg_s is not None:
-            self.bg_s.update(lik, 1, av, T1, T0, zeros, av if order else ones, rng)
-            self.b = self.bg_s.population_rate
-        elif cfg.prior_b.fixed is None:
-            hi = float(av.min()) if order else 1.0
-            if order and cfg.prior_b.beta_ab:
-                ba, bb = cfg.prior_b.beta_ab
-                self.b = truncated_beta(rng, ba + T1[:, 0].sum(), bb + T0[:, 0].sum(), hi=hi)
-            else:
-                def lb(x):
-                    if x >= hi:
-                        return -np.inf
-                    return rows_loglik(lik, av, np.full(n, x), T1, T0) + cfg.prior_b.logpdf(x)
+                    self.ag[g] = slice_sample_unit(la, max(self.ag[g], lo + 1e-9), rng)
+            av = self._a_vec(g)
+            if self.bg_s is not None:
+                self.bg_s[g].update(lik, 1, av, T1, T0, zeros, av if order else ones, rng)
+            elif cfg.prior_b.fixed is None:
+                hi = float(av.min()) if order else 1.0
+                if order and cfg.prior_b.beta_ab:
+                    ba, bb = cfg.prior_b.beta_ab
+                    self.bg[g] = truncated_beta(rng, ba + T1[:, 0].sum(), bb + T0[:, 0].sum(),
+                                                hi=hi)
+                else:
+                    def lb(x, T1=T1, T0=T0, av=av, hi=hi):
+                        if x >= hi:
+                            return -np.inf
+                        return rows_loglik(lik, av, np.full(n, x), T1, T0) + cfg.prior_b.logpdf(x)
 
-                self.b = slice_sample_unit(lb, min(self.b, hi - 1e-9), rng)
-        return self.a, self.b, float(rows_loglik(lik, av, self._b_vec(), H1, H0))
+                    self.bg[g] = slice_sample_unit(lb, min(self.bg[g], hi - 1e-9), rng)
+            ll += float(rows_loglik(lik, av, self._b_vec(g), H1, H0))
+        return self.a, self.b, float(ll)
 
     def accumulate(self, Z, U, explained, predictive):
         T1, _ = self.tables()
-        accumulate_entries(self.C, T1, explained, predictive)
+        accumulate_entries(self.C, T1, explained, predictive, self.fg)
 
     def draw_extras(self):
-        """Per-sample rates and spreads to keep with a draw (None when rates are global)."""
+        """Per-sample rates (one column per group with G > 1) and spreads to keep with a draw,
+        and with G > 1 every group's population rates."""
         out = {}
+        G = self.G
         if self.det_s is not None:
-            out["detection"] = self.det_s.rates.astype(np.float32)
+            v = np.stack([s.rates for s in self.det_s], 1)
+            out["detection"] = (v[:, 0] if G == 1 else v).astype(np.float32)
         if self.bg_s is not None:
-            out["background"] = self.bg_s.rates.astype(np.float32)
-        spread = (self.det_s.sigma if self.det_s is not None else np.nan,
-                  self.bg_s.sigma if self.bg_s is not None else np.nan, np.nan)
+            v = np.stack([s.rates for s in self.bg_s], 1)
+            out["background"] = (v[:, 0] if G == 1 else v).astype(np.float32)
+        if G > 1:
+            a, b = self.group_rates()
+            out["group_detection"], out["group_background"] = a, b
+        spread = (float(np.mean([s.sigma for s in self.det_s])) if self.det_s is not None
+                  else np.nan,
+                  float(np.mean([s.sigma for s in self.bg_s])) if self.bg_s is not None
+                  else np.nan, np.nan)
         return out, (spread if self.per_sample else None)
 
     def slot_rates(self, slots):

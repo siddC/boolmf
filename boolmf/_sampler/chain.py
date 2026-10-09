@@ -63,6 +63,7 @@ class ChainConfig:
     background_effects: tuple = ()    # ("sample",) for per-sample background rates
     likelihood_power: float = 1.0     # zeta < 1: coarsened posterior, likelihood^zeta x prior
     population: str = ""              # settings of the population moves ("" = independent)
+    feature_groups: object = None     # int64 group code per feature: rates per group (None: one)
     verbose: int = 0
 
 
@@ -531,7 +532,7 @@ def chain_steps(V, cfg, seed, init, population=False, resume=None):
             engine.accumulate(Z, U, explained, predictive)
         extras, spread = engine.draw_extras()
         for kind, v in extras.items():
-            d_srates[kind].append(v)
+            d_srates.setdefault(kind, []).append(v)
         if spread is not None:
             d_spread.append(spread)
         used = np.flatnonzero((nmem > 0) & (nact > 0) | ~free)
@@ -553,6 +554,8 @@ def chain_steps(V, cfg, seed, init, population=False, resume=None):
             }
             if lam is not None:
                 draw["lam"] = lam.astype(np.float64)
+            if getattr(engine, "G", 1) > 1:
+                draw["a_g"], draw["b_g"] = engine.group_rates()
             draws.append(draw)
         d_rates.append((a, b))
         d_alpha.append(alpha if cfg.nonparametric else np.nan)

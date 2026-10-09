@@ -127,7 +127,7 @@ def test_per_sample_rates_widen_under_coarsening():
         for i in range(1500):
             eng.update_rates(V, Z, U, rng)
             if i >= 300:
-                draws.append(eng.det_s.rates.copy())
+                draws.append(eng.det_s[0].rates.copy())
         sd[zeta] = np.std(draws, axis=0).mean()
     assert sd[0.1] > 1.25 * sd[1.0]          # 1.5 here; 0.85 if the counts are not tempered
 
