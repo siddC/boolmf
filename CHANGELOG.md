@@ -3,6 +3,17 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `feature_groups` for `BayesianBooleanMF`: a group label per feature, with the detection and
+  background rates (global or per sample) learned separately for each group. Built for
+  minority-coded presence/absence matrices: presence for genes below a frequency threshold,
+  absence (1 = gene absent) for the rest. A missing gene call lowers the detection rate of
+  presence-coded columns but raises the background rate of absence-coded ones, so one rate per
+  genome cannot serve both. Each entry reads its likelihood from a (sample, group) table row in
+  every kernel (Gibbs, split-merge, population moves, predictive accumulation, `transform`).
+  Checked against the exact posterior of an enumerable problem with two groups; fits without
+  groups, or with a single group, are unchanged bit for bit. New attributes `feature_groups_`,
+  `detection_rate_per_group_` and `background_rate_per_group_`; per-sample rates gain a group
+  axis.
 - `boolmf.consensus`: robust components from every stored draw, and a convergence check on
   them. `robust_components(draws)` finds the components present in at least half of all draws
   and in at least two chains (cell Jaccard >= 0.5 between draws), and returns their membership

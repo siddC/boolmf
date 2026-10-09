@@ -7,12 +7,16 @@ Z : int8 (n_samples, K)              activation of component k in sample i
 U : int8 (n_features, K)             membership of feature j in component k
 C : int16 (n_samples, n_features)    number of active components containing feature j in sample i
 T1, T0 : float64 (n_rows, K + 2)     log P(x_ij = 1 | c) and log P(x_ij = 0 | c) for c = 0 .. K + 1:
-                                     one row per sample, or a single row shared by all samples
-                                     when the rates are global (row index i * rs, rs = 0 or 1)
+                                     one row per (sample, feature group), or one row per feature
+                                     group shared by all samples when the rates are global; the
+                                     row of entry (i, j) is (i * rs) * G + fg[j], rs = 0 or 1
+fg : int64 (n_features,)             feature group of every feature (0 .. G - 1); all zeros and
+                                     G = 1 without groups, which gives the row index i * rs
 
 Both likelihoods and every rate model enter the kernels only through the tables T1 and T0, so
 one kernel serves ``likelihood="noisy_or"`` and ``"or_flip"``, with global or per-sample rates.
-``project_activations`` (new samples) takes a single row of each table.
+``project_activations`` (new samples) takes one row per feature group. The public functions
+take ``fg`` as an optional last argument; the numba kernels behind them take it always.
 
 Randomness uses a counter-based SplitMix64 stream per (sweep seed, row), so results do not depend
 on the number of threads or on how numba schedules them.
@@ -81,19 +85,34 @@ def counts_from_state(Z, U):
     return C
 
 
-@njit(parallel=True, cache=True)
+def _groups(fg, F):
+    if fg is None:
+        return np.zeros(F, np.int64), 1
+    fg = np.ascontiguousarray(fg, np.int64)
+    return fg, (int(fg.max()) + 1 if fg.size else 1)
+
+
 def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask, seed,
-                       metropolis=False):
+                       metropolis=False, fg=None):
     """Gibbs update of U[j, k] for every feature j (in parallel) and component k.
 
     Rows of U are independent given Z, so updating all features at once is an exact
     Gibbs step. Only samples where component k is active carry likelihood information.
     """
+    fg, G = _groups(fg, U.shape[0])
+    _update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask, seed,
+                        metropolis, fg, G)
+
+
+@njit(parallel=True, cache=True)
+def _update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask, seed,
+                        metropolis, fg, G):
     F, K = U.shape
-    rs = 1 if T1.shape[0] > 1 else 0
+    rs = 1 if T1.shape[0] > G else 0
     pr = 1 if logit_rho.shape[0] > 1 else 0
     for j in prange(F):
         state = _row_state(seed, j)
+        gj = fg[j]
         for k in range(K):
             if not update_mask[k]:
                 continue
@@ -105,7 +124,7 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
                 if v < 0:
                     continue
                 cm = C[i, j] - old
-                ti = i * rs
+                ti = (i * rs) * G + gj
                 if v == 1:
                     lo += T1[ti, cm + 1] - T1[ti, cm]
                 else:
@@ -118,16 +137,23 @@ def update_memberships(V, U, C, T1, T0, logit_rho, act_ptr, act_idx, update_mask
                 U[j, k] = new
 
 
-@njit(parallel=True, cache=True)
 def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask, seed,
-                       metropolis=False):
+                       metropolis=False, fg=None):
     """Gibbs update of Z[i, k] for every sample i (in parallel) and component k."""
+    fg, G = _groups(fg, V.shape[1])
+    _update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask, seed,
+                        metropolis, fg, G)
+
+
+@njit(parallel=True, cache=True)
+def _update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask, seed,
+                        metropolis, fg, G):
     n, K = Z.shape
-    rs = 1 if T1.shape[0] > 1 else 0
+    rs = 1 if T1.shape[0] > G else 0
     pz = 1 if logit_pi.shape[0] > 1 else 0
     for i in prange(n):
         state = _row_state(seed, i)
-        ti = i * rs
+        tb = (i * rs) * G
         for k in range(K):
             if not update_mask[k]:
                 continue
@@ -139,6 +165,7 @@ def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask,
                 if v < 0:
                     continue
                 cm = C[i, j] - old
+                ti = tb + fg[j]
                 if v == 1:
                     lo += T1[ti, cm + 1] - T1[ti, cm]
                 else:
@@ -151,14 +178,24 @@ def update_activations(V, Z, C, T1, T0, logit_pi, mem_ptr, mem_idx, update_mask,
                 Z[i, k] = new
 
 
-@njit(parallel=True, cache=True)
-def project_activations(V, U, T1, T0, logit_pi, mem_ptr, mem_idx, row_seeds, n_sweeps, n_keep):
+def project_activations(V, U, T1, T0, logit_pi, mem_ptr, mem_idx, row_seeds, n_sweeps, n_keep,
+                        fg=None):
     """Sample activations for new samples with memberships held fixed.
 
     Each row gets its own random stream from ``row_seeds`` (derived from the row's content),
     so the result for a row does not depend on which other rows are projected with it.
-    Returns the mean activation over the last ``n_keep`` sweeps.
+    Returns the mean activation over the last ``n_keep`` sweeps. T1, T0: one table row (1-D)
+    or one row per feature group (G, K + 2) with ``fg``.
     """
+    fg, _G = _groups(fg, V.shape[1])
+    T1, T0 = np.atleast_2d(T1), np.atleast_2d(T0)
+    return _project_activations(V, U, T1, T0, logit_pi, mem_ptr, mem_idx, row_seeds, n_sweeps,
+                                n_keep, fg)
+
+
+@njit(parallel=True, cache=True)
+def _project_activations(V, U, T1, T0, logit_pi, mem_ptr, mem_idx, row_seeds, n_sweeps, n_keep,
+                         fg):
     n, F = V.shape
     K = U.shape[1]
     out = np.zeros((n, K), np.float64)
@@ -176,10 +213,11 @@ def project_activations(V, U, T1, T0, logit_pi, mem_ptr, mem_idx, row_seeds, n_s
                     if v < 0:
                         continue
                     cm = c[j] - old
+                    g = fg[j]
                     if v == 1:
-                        lo += T1[cm + 1] - T1[cm]
+                        lo += T1[g, cm + 1] - T1[g, cm]
                     else:
-                        lo += T0[cm + 1] - T0[cm]
+                        lo += T0[g, cm + 1] - T0[g, cm]
                 state, u = _next_uniform(state)
                 new = np.int8(1) if u * (1.0 + np.exp(-lo)) < 1.0 else np.int8(0)
                 if new != old:
@@ -218,17 +256,23 @@ def count_histograms(V, C, cmax):
     return H1b.sum(axis=0), H0b.sum(axis=0)
 
 
-@njit(parallel=True, cache=True)
-def accumulate_entries(C, T1, explained_acc, predictive_acc):
+def accumulate_entries(C, T1, explained_acc, predictive_acc, fg=None):
     """explained_acc += (C >= 1); predictive_acc += P(x_ij = 1 | C_ij) for every entry."""
+    fg, G = _groups(fg, C.shape[1])
+    _accumulate_entries(C, T1, explained_acc, predictive_acc, fg, G)
+
+
+@njit(parallel=True, cache=True)
+def _accumulate_entries(C, T1, explained_acc, predictive_acc, fg, G):
     n, F = C.shape
-    rs = 1 if T1.shape[0] > 1 else 0
+    rs = 1 if T1.shape[0] > G else 0
     for i in prange(n):
+        tb = (i * rs) * G
         for j in range(F):
             c = C[i, j]
             if c >= 1:
                 explained_acc[i, j] += 1
-            predictive_acc[i, j] += np.exp(T1[i * rs, c])
+            predictive_acc[i, j] += np.exp(T1[tb + fg[j], c])
 
 
 @njit(parallel=True, cache=True)
@@ -250,4 +294,49 @@ def row_histograms(V, C, cmax):
                 H1[i, c] += 1
             else:
                 H0[i, c] += 1
+    return H1, H0
+
+
+@njit(parallel=True, cache=True)
+def group_count_histograms(V, C, cmax, fg, G):
+    """H1[g, c], H0[g, c]: observed present / absent entries of feature group g with count c
+    (capped at cmax)."""
+    n, F = V.shape
+    nb = (n + 63) // 64
+    H1b = np.zeros((nb, G, cmax + 1), np.int64)
+    H0b = np.zeros((nb, G, cmax + 1), np.int64)
+    for b in prange(nb):
+        for i in range(b * 64, min(n, (b + 1) * 64)):
+            for j in range(F):
+                v = V[i, j]
+                if v < 0:
+                    continue
+                c = C[i, j]
+                if c > cmax:
+                    c = cmax
+                if v == 1:
+                    H1b[b, fg[j], c] += 1
+                else:
+                    H0b[b, fg[j], c] += 1
+    return H1b.sum(axis=0), H0b.sum(axis=0)
+
+
+@njit(parallel=True, cache=True)
+def group_row_histograms(V, C, cmax, fg, G):
+    """Per-sample, per-group count histograms H1[i, g, c], H0[i, g, c] (capped at cmax)."""
+    n, F = V.shape
+    H1 = np.zeros((n, G, cmax + 1), np.int64)
+    H0 = np.zeros((n, G, cmax + 1), np.int64)
+    for i in prange(n):
+        for j in range(F):
+            v = V[i, j]
+            if v < 0:
+                continue
+            c = C[i, j]
+            if c > cmax:
+                c = cmax
+            if v == 1:
+                H1[i, fg[j], c] += 1
+            else:
+                H0[i, fg[j], c] += 1
     return H1, H0
