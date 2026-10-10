@@ -3,6 +3,43 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `pin_init` for `BayesianBooleanMF`: with a tuple `init` (or one per chain), every init
+  component keeps its own slot in every chain. Its members and carriers are still sampled, but
+  it takes no part in split-merge or population moves, is never emptied for reuse, and under
+  the Indian buffet process has a Beta(1, 1) activation probability; the remaining slots keep
+  the IBP and hold the structure the pinned components leave. Built for a second stage: refit
+  the robust components of a first fit with their number fixed, each chain starting from its
+  own draw of their probabilities (`RobustComponents.sample`), so that every membership and
+  activation probability has the same identity in every chain and draw and its convergence
+  can be checked entry by entry. `pinned_components()` returns them, in the order of `init`,
+  with that check (over the draws in which each is present); `n_pinned_` counts them. On the
+  GENOMiCUS-4k balanced subsample (joint presence/absence fit), refitting the 261 robust
+  components with 276 free slots (4 independent chains, 6,000 sweeps) improves the L,A summary
+  on held-out cells from -0.161 to -0.129 per cell (per-genome rates fitted on training cells)
+  and F1 from 0.931 to 0.940. Entries with probability at least 0.9 converge (98% with R-hat
+  below 1.1); entries between 0.1 and 0.9, a quarter of the informative ones, do not (46% of
+  memberships, 64% of activations), and 9 of the 261 pinned components are emptied in more
+  than 10% of the draws. Pinning does not stop the OR model from moving structure between
+  slots: a free slot can come to cover a pinned component's entries.
+- Entry-wise convergence of components in `boolmf.consensus`: `robust_components` now also
+  returns the split-chain R-hat of every membership and activation indicator
+  (`member_rhat`, `activation_rhat`, over the draws holding the component) and the
+  probabilities from each chain alone (`chain_members`, `chain_activations`);
+  `RobustComponents.convergence()` summarizes them (share of entries below R-hat cut-offs,
+  spread between chains, the 99th percentile per component). `split_rhat` computes the R-hat
+  of binary indicators from their counts per split chain; `slot_components` builds components
+  from draws by slot (for pinned components). `RobustComponents` gains `majority()` and
+  `sample()`, and `reconstruct` accepts rates per cell (shape (n_samples, n_features)), for
+  example the per-sample rates of each feature's group. On the GENOMiCUS-4k balanced subsample
+  (joint presence/absence fit, 6,000 sweeps, population moves) 74% of the informative
+  membership entries of the 261 robust components have R-hat below 1.1 but only 35% of those
+  with probability between 0.05 and 0.95, and the 99th-percentile R-hat is below 1.1 for 14%
+  of the components: the robust components are found, but their boundaries differ between
+  chains.
+- `examples/bbmf_phylons.py`: the two-stage workflow for phylons from a gene presence/absence
+  matrix (minority coding, discovery fit with population moves, robust components, pinned
+  refit with independent chains), writing L and A, per-phylon and per-genome tables, the
+  posterior predictive and convergence and held-out diagnostics; resumable from checkpoints.
 - `feature_groups` for `BayesianBooleanMF`: a group label per feature, with the detection and
   background rates (global or per sample) learned separately for each group. Built for
   minority-coded presence/absence matrices: presence for genes below a frequency threshold,
@@ -210,6 +247,15 @@
   published overestimate at 20% flips.
 
 ### Changed
+- Chains run in parallel (`n_jobs`) share the cores numba may use (`NUMBA_NUM_THREADS`)
+  instead of all cores of the machine.
+- Per-sample rates under `or_flip` cost less with many component slots: the likelihood tables
+  ((samples x groups) x (slots + 2)) are filled from one value per row instead of computed
+  entry by entry, and the count histograms behind the rate updates stop at the largest count in
+  use. Results are unchanged bit for bit. On all 3,944 GENOMiCUS-4k genomes (2,000 slots, two
+  chains with population moves, one thread) a sweep takes a third less time, and the share of
+  it spent in the parallel Gibbs kernels rises from about half to three quarters, so more cores
+  now help more.
 - `init="nmf"` binarizes the NMF start the way NMF phylons are binarized: each component
   (and each column of its activations) is split by k-means with 3 clusters
   (`KMeans(n_clusters=3, n_init="auto")`) and only the cluster with the highest center is

@@ -62,6 +62,28 @@ class _LazyDraws:
         return Z, U
 
 
+class _LazySlotDraws:
+    """One chain's stored draws as a sequence of (slots, Z, U), unpacked on access."""
+
+    def __init__(self, draws, n, F):
+        self._d, self._n, self._F = draws, n, F
+
+    def __len__(self):
+        return len(self._d)
+
+    def __getitem__(self, t):
+        d = self._d[t]
+        return (np.asarray(d["slots"]),
+                np.unpackbits(d["Z"], axis=0, count=self._n).astype(bool),
+                np.unpackbits(d["U"], axis=0, count=self._F).astype(bool))
+
+
+def _numba_threads():
+    import numba
+
+    return int(numba.config.NUMBA_NUM_THREADS)
+
+
 def _is_real(value):
     return isinstance(value, numbers.Real) and not isinstance(value, bool)
 
@@ -375,6 +397,23 @@ or None
     init_params : dict or None, default=None
         Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"`` (plus
         ``binarize_clusters``, see ``init``), or for Asso when ``init="asso"``.
+    pin_init : bool, default=False
+        With a tuple ``init`` (or a list of them, all with the same number of components):
+        every component of ``init`` keeps its own slot in every chain. Its members and carriers
+        are still sampled, but it takes no part in split-merge or population moves and its slot
+        is never cleared for a new component (the Gibbs updates can still empty it when the data
+        stop supporting it, which ``pinned_components`` reports as a support below 1); under the
+        Indian buffet process its activation probability has a Beta(1, 1) prior (the remaining
+        ``max_components - n_init`` slots keep the IBP and hold whatever structure the pinned
+        components leave). Because a pinned component keeps its slot in every chain and draw,
+        its membership and activation probabilities can be checked for convergence entry by
+        entry without matching (``pinned_components``). Under the OR model a free slot can
+        still come to cover the same entries, so the matched summary (``robust_components``)
+        remains a useful cross-check.
+        Built to refit the robust components of a first fit (``robust_components``) as a model
+        with their number fixed; start each chain from a different ``RobustComponents.sample``
+        so that the chains begin dispersed. Needs ``births="slots"`` and
+        ``ibp_side="samples"``.
     robustness_threshold : float, default=0.5
         Fraction of chains a component must appear in to be flagged robust.
     min_support : float, default=3
@@ -393,7 +432,9 @@ or None
         Sweeps between checkpoints.
     random_state : int, RandomState instance or None, default=None
     n_jobs : int or None, default=None
-        Number of chains run in parallel (joblib).
+        Number of chains run in parallel (joblib). They share the cores numba may use
+        (``NUMBA_NUM_THREADS``, by default all of them); a single chain, or a population
+        (``population_moves``), uses all of them in its parallel kernels.
     verbose : int, default=0
 
     Attributes
@@ -436,6 +477,8 @@ or None
         intervals and ``detection_component_spread_`` the spread of the logit rates.
     alpha_ : float or None
         Posterior mean of the Indian buffet process concentration.
+    n_pinned_ : int
+        Number of components pinned by ``pin_init`` (0 without it).
     map_components_, map_activations_ : ndarray of uint8 or None
         The kept draw with the highest unnormalized log posterior over all good chains (the
         point estimate of Wagala et al. 2026), its components in the order of
@@ -504,6 +547,7 @@ or None
         min_ess=400,
         init="random",
         init_params=None,
+        pin_init=False,
         robustness_threshold=0.5,
         min_support=3,
         store_draws=True,
@@ -549,6 +593,7 @@ or None
         self.min_ess = min_ess
         self.init = init
         self.init_params = init_params
+        self.pin_init = pin_init
         self.robustness_threshold = robustness_threshold
         self.min_support = min_support
         self.store_draws = store_draws
@@ -721,6 +766,12 @@ or None
                              "(members, activations) tuple or a list of them (one per chain); "
                              f"got {self.init!r}.")
         self._check_population()
+        if self.pin_init:
+            if not isinstance(self.init, (tuple, list)):
+                raise ValueError("pin_init needs init as a (members, activations) tuple or a "
+                                 "list of them.")
+            if self.births != "slots" or self.ibp_side != "samples":
+                raise ValueError("pin_init needs births='slots' and ibp_side='samples'.")
         if self.feature_groups is not None:
             if self.births != "slots":
                 raise ValueError("feature_groups needs births='slots'.")
@@ -868,13 +919,30 @@ or None
         V_fit = np.ascontiguousarray(V.T) if flip else V
         init = self._initial_state(V, n_free)
         inits = init if isinstance(init, list) else [init] * self.n_chains
+        n_pinned = 0
+        if self.pin_init:
+            sizes = {x[0].shape[0] for x in inits}
+            if len(sizes) != 1:
+                raise ValueError("pin_init needs the same number of components in every "
+                                 f"chain's init; got {sorted(sizes)}.")
+            n_pinned = sizes.pop()
+            if n_pinned > n_free:
+                raise ValueError(f"pin_init: {n_pinned} init components do not fit in "
+                                 f"{n_free} slots; raise max_components (or n_components).")
+            if nonparametric and n_pinned == n_free:
+                warnings.warn("pin_init leaves no free slot for other structure; raise "
+                              "max_components above the number of init components.",
+                              stacklevel=2)
+        self.n_pinned_ = n_pinned
         if flip:
             inits = [(x[1].T, x[0].T) if isinstance(x, tuple) else x for x in inits]
         population = int(self.population_moves) > 0
         pcfg = self._population_config() if population else None
         n_jobs = self.n_jobs if self.n_jobs is not None else 1
         n_workers = os.cpu_count() if n_jobs == -1 else max(1, min(n_jobs, self.n_chains))
-        n_threads = max(1, (os.cpu_count() or 1) // max(1, n_workers)) if n_workers > 1 else 0
+        # chains run in parallel share the threads numba may use (NUMBA_NUM_THREADS)
+        n_cores = min(os.cpu_count() or 1, _numba_threads())
+        n_threads = max(1, n_cores // max(1, n_workers)) if n_workers > 1 else 0
 
         density = float((V == 1).sum() / max((V >= 0).sum(), 1))
         if flip:        # fit the transpose: the IBP sits on its rows, the samples' prior on U
@@ -912,6 +980,7 @@ or None
                 else self._init_key(inits[0])),
             population=repr(vars(pcfg)) if population else "",
             feature_groups=fg_codes,
+            n_pinned=n_pinned,
             track_map=(not nonparametric and not na and fg_codes is None
                        and not (self._levels("detection_effects")
                                 or self._levels("background_effects"))),
@@ -987,7 +1056,7 @@ or None
                 raise ValueError("init members must have shape (n_init, n_features).")
             if activations.shape != (V.shape[0], members.shape[0]):
                 raise ValueError("init activations must have shape (n_samples, n_init).")
-            if members.shape[0] > n_free:
+            if members.shape[0] > n_free and not self.pin_init:
                 warnings.warn("init has more components than slots; extra ones are dropped.",
                               stacklevel=3)
             return (members.astype(bool), activations.astype(bool))
@@ -1232,7 +1301,9 @@ or None
             warnings.warn(
                 "births were cut short because every component slot was in use; increase "
                 "max_components.", stacklevel=3)
-        elif nonparametric and np.median(self.n_components_draws_) > 0.8 * n_free:
+        elif nonparametric and n_free > getattr(self, "n_pinned_", 0) and (
+                np.median(self.n_components_draws_) - getattr(self, "n_pinned_", 0)
+                > 0.8 * (n_free - getattr(self, "n_pinned_", 0))):
             warnings.warn(
                 "more than 80% of component slots are in use; increase max_components.",
                 stacklevel=3)
@@ -1560,6 +1631,31 @@ or None
 
         kwargs.setdefault("min_size", int(np.ceil(self.min_support)))
         return robust_components(self._chain_draws(), **kwargs)
+
+    def pinned_components(self):
+        """The components pinned by ``pin_init``, identified by their slot in every stored draw
+        (``boolmf.consensus.slot_components``): membership and activation probabilities in the
+        order of ``init``, support, and the split-chain R-hat of every entry
+        (``RobustComponents.convergence``).
+
+        Returns
+        -------
+        boolmf.consensus.RobustComponents
+        """
+        from .consensus import slot_components
+
+        check_is_fitted(self, "components_")
+        if not getattr(self, "n_pinned_", 0):
+            raise ValueError("no pinned components; fit with pin_init=True.")
+        if not self._draws_:
+            raise ValueError("no stored draws; fit with store_draws=True (or an int).")
+        n, F, na = self._n_train_samples_, self.components_.shape[1], self._n_anchor_
+        chains = {}
+        for d in self._draws_:
+            chains.setdefault(d["chain"], []).append(d)
+        draws = [_LazySlotDraws(chains[c], n, F) for c in sorted(chains)]
+        return slot_components(draws, np.arange(na, na + self.n_pinned_), n_samples=n,
+                               n_features=F)
 
     def robust_stability(self, n_windows=4, **kwargs):
         """Window-to-window stability of the robust components

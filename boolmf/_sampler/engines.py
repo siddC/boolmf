@@ -42,7 +42,7 @@ from .logsurv import (
     update_sample_backgrounds,
     update_sample_offsets,
 )
-from .rates import SampleRates, likelihood_code, rows_loglik, slice_sample_real, table_rows
+from .rates import _EPS, SampleRates, likelihood_code, rows_loglik, slice_sample_real, table_rows
 from .splitmerge import split_merge_moves, split_merge_moves_logsurv
 
 SPREAD_SCALE = 1.0          # half-Cauchy scale of every logit-scale spread
@@ -175,7 +175,31 @@ class CountEngine:
     def _b_vec(self, g):
         return self.bg_s[g].rates if self.bg_s is not None else np.full(self.n, self.bg[g])
 
-    def tables(self):
+    def tables(self, power=1.0):
+        """Likelihood tables T1, T0 (rows as in ``kernels``), times ``power``."""
+        K, G = self.K, self.G
+        if self.per_sample and self.cfg.likelihood == "or_flip":
+            # or_flip: a row is log(b) at c = 0 and log(a) for every c >= 1, so the (n * G) x
+            # (K + 2) tables are filled from per-row values (the same numbers table_rows
+            # computes entry by entry, at a fraction of the cost when K is large)
+            T1 = np.empty((self.n, G, K + 2))
+            T0 = np.empty((self.n, G, K + 2))
+            for g in range(G):
+                pa = np.clip(self._a_vec(g), _EPS, 1.0 - _EPS)
+                pb = np.clip(self._b_vec(g), _EPS, 1.0 - _EPS)
+                for T, fa, fb in ((T1, np.log(pa), np.log(pb)),
+                                  (T0, np.log1p(-pa), np.log1p(-pb))):
+                    if power != 1.0:
+                        fa, fb = power * fa, power * fb
+                    T[:, g, 0] = fb
+                    T[:, g, 1:] = fa[:, None]
+            return T1.reshape(self.n * G, K + 2), T0.reshape(self.n * G, K + 2)
+        T1, T0 = self._tables()
+        if power != 1.0:
+            T1, T0 = power * T1, power * T0
+        return T1, T0
+
+    def _tables(self):
         K, G = self.K, self.G
         if not self.per_sample:             # one row per group shared by every sample
             lik = self.cfg.likelihood
@@ -190,9 +214,7 @@ class CountEngine:
         return T1, T0
 
     def begin_sweep(self, Z, U):
-        self.T1, self.T0 = self.tables()
-        if self.power != 1.0:
-            self.T1, self.T0 = self.power * self.T1, self.power * self.T0
+        self.T1, self.T0 = self.tables(self.power)
 
     def _tempered(self, H1, H0):
         if self.power == 1.0:
@@ -233,7 +255,10 @@ class CountEngine:
                 ll += histogram_loglik(cfg.likelihood, self.ag[g], self.bg[g], H1, H0)
             return self.a, self.b, float(ll)
         n, lik = self.n, self.lik
-        H1g, H0g = group_row_histograms(V, self.C, self.K, self.fg, self.G)
+        # histograms only up to the largest count in use: the bins above it are empty, and
+        # every sum over bins skips empty ones, so this changes nothing but the cost
+        cmax = max(1, min(self.K, int(self.C.max()) if self.C.size else 0))
+        H1g, H0g = group_row_histograms(V, self.C, cmax, self.fg, self.G)
         order = cfg.likelihood == "or_flip"
         zeros, ones = np.zeros(n), np.ones(n)
         for g in range(self.G):
