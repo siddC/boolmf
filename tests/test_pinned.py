@@ -66,6 +66,21 @@ def test_slot_components_follow_the_slots():
     assert conv["members"]["n_entries"] >= 22
 
 
+def test_slot_components_skip_draws_where_the_slot_is_empty():
+    draws = _block_draws()
+    for chain in draws:
+        for t in range(0, len(chain), 4):                 # slot 3 empty, members from the prior
+            sl, Z, U = chain[t]
+            Z, U = Z.copy(), U.copy()
+            Z[:, 0] = False
+            U[:, 0] = np.random.default_rng(t).random(U.shape[0]) < 0.5
+            chain[t] = (sl, Z, U)
+    rc = slot_components(draws, [3], n_samples=30, n_features=40)
+    assert rc.support[0] == pytest.approx(0.75)
+    assert rc.members[0, 12:].max() < 0.2                 # the prior draws are left out
+    assert rc.activations[:10, 0].min() == 1.0
+
+
 def test_robust_components_report_entry_rhat():
     draws = [[(Z, U) for _, Z, U in chain] for chain in _block_draws(3, 30, seed=1)]
     rc = robust_components(draws)

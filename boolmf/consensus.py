@@ -358,8 +358,12 @@ def slot_components(draws, slots, *, n_samples, n_features):
     Returns
     -------
     RobustComponents
-        One component per slot, in the order given; support is the share of draws in which the
-        slot has at least one carrier and one member. Not reordered.
+        One component per slot, in the order given (not reordered). As for
+        ``robust_components``, probabilities and R-hat are over the draws in which the component
+        is present (the slot has at least one carrier and one member), and support is the share
+        of draws in which it is: a pinned component that the data stop supporting is emptied
+        by the Gibbs updates, and its members in those draws (drawn from their prior) say
+        nothing about it.
     """
     lengths = _check(draws)
     n_chains = len(draws)
@@ -376,12 +380,12 @@ def slot_components(draws, slots, *, n_samples, n_features):
             s_ = 2 * c + (2 * t >= lengths[c])
             for col, slot in enumerate(np.asarray(sl)):
                 k = where.get(int(slot))
-                if k is None:
+                if k is None or not (Z[:, col].any() and U[:, col].any()):
                     continue
                 msum[k, s_] += U[:, col]
                 asum[k, s_] += Z[:, col]
                 nsplit[k, s_] += 1
-                count[c][k, t] = bool(Z[:, col].any() and U[:, col].any())
+                count[c][k, t] = True
     nchain = nsplit[:, 0::2] + nsplit[:, 1::2]
     occ = np.maximum(nsplit.sum(1), 1)
     with np.errstate(invalid="ignore", divide="ignore"):

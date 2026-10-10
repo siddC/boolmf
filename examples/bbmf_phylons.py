@@ -20,8 +20,10 @@ What it does
 3. Refit: the robust components pinned (``pin_init=True``), each chain starting from its own
    draw of their probabilities, plus --free-slots free slots for the remaining structure;
    independent chains (no population moves), --refit-sweeps sweeps. The pinned components
-   keep their identity in every chain and draw, so the split-chain R-hat of every entry of L
-   and A is a fair convergence check. These are the phylons.
+   keep their slot in every chain and draw, so the split-chain R-hat of every entry of L and
+   A is a fair convergence check (over the draws in which the component is present). These
+   are the phylons; a pinned component that the refit empties in most draws
+   (``supported_in_refit`` False in phylons.csv) is not supported once the others are fixed.
 
 In phylon notation P = L o A (Boolean product: P[g, s] = OR_k L[g, k] AND A[k, s]), with P the
 minority-coded matrix (genes x genomes), L genes x phylons and A phylons x genomes. boolmf
@@ -244,6 +246,19 @@ def precision_recall(rc, D):
     return {"precision": prec, "recall": rec, "F1": 2 * prec * rec / max(prec + rec, 1e-12)}
 
 
+def core_margin(rc):
+    """R-hat below 1.1 for core entries (probability >= 0.9) and margin entries (0.1 to 0.9)."""
+    out = {}
+    for name, P, R in (("members", rc.members, rc.member_rhat),
+                       ("activations", rc.activations, rc.activation_rhat)):
+        for part, sel in (("core", P >= 0.9), ("margin", (P > 0.1) & (P < 0.9))):
+            r = R[sel]
+            r = r[~np.isnan(r)]
+            out[f"{name}_{part}_entries"] = int(sel.sum())
+            out[f"{name}_{part}_rhat_below_1.1"] = float(np.mean(r < 1.1)) if r.size else None
+    return out
+
+
 def chain_spread(m):
     tr = m.log_likelihood_trace_
     half = tr[:, tr.shape[1] // 2:]
@@ -356,6 +371,7 @@ def discovery(D):
         "population_acceptance": m.population_acceptance_,
         "split_merge_acceptance": m.split_merge_acceptance_,
         "stability": stability, "entry_convergence": conv,
+        "entry_convergence_core_margin": core_margin(rc),
         "components_q99_rhat": conv_comp,
         "heldout_full_posterior": heldout_ll(m.predictive_probability(), D),
         "heldout_robust_LA": heldout_ll(rc.reconstruct(det, bg), D),
@@ -400,8 +416,11 @@ def refit(D, rc1, s1):
     pc = m.pinned_components()
     conv = pc.convergence()
     comp_rhat = conv.pop("components")
-    # robust components among the free slots that no pinned component matches
+    # robust components of the refit found by matching over all slots (pinned and free): the
+    # same summary as the discovery stage, from independent chains
     allrc = m.robust_components()
+    conv_all = allrc.convergence()
+    conv_all_comp = conv_all.pop("components")
     Rp, Gp = (x.astype(np.float32) for x in (pc.majority()[1].T, pc.majority()[0]))
     Ra, Ga = (x.astype(np.float32) for x in (allrc.majority()[1].T, allrc.majority()[0]))
     new = int((_cell_jaccard(Ra, Ga, Rp, Gp).max(1) < 0.5).sum()) if len(Ra) and len(Rp) \
@@ -412,7 +431,14 @@ def refit(D, rc1, s1):
         "log_likelihood_chain_spread": chain_spread(m),
         "split_merge_acceptance": m.split_merge_acceptance_,
         "pinned_support_min": float(pc.support.min()) if K else None,
+        "pinned_support_below_0.5": int((pc.support < 0.5).sum()),
         "entry_convergence": conv,
+        "entry_convergence_core_margin": core_margin(pc),
+        "matched_components": allrc.n_components,
+        "matched_entry_convergence": conv_all,
+        "matched_entry_convergence_core_margin": core_margin(allrc),
+        "matched_components_q99_rhat_below_1.1": float(np.mean(conv_all_comp < 1.1))
+        if allrc.n_components else None,
         "components_q99_rhat_below": {t_: float(np.mean(comp_rhat < t_))
                                       for t_ in (1.01, 1.05, 1.1, 1.2)},
         "robust_in_free_slots_unmatched": new,
@@ -452,6 +478,7 @@ def main():
         "stage1_support": rc1.support,
         "stage1_chains_present": (rc1.chain_support > 0).sum(1),
         "support": pc.support,
+        "supported_in_refit": pc.support >= 0.5,
         "n_genes_present": ((Lp >= 0.5) & pres).sum(1),
         "n_genes_absent": ((Lp >= 0.5) & absn).sum(1),
         "n_genomes": (Ap >= 0.5).sum(0),

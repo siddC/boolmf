@@ -400,12 +400,16 @@ or None
     pin_init : bool, default=False
         With a tuple ``init`` (or a list of them, all with the same number of components):
         every component of ``init`` keeps its own slot in every chain. Its members and carriers
-        are still sampled, but it takes no part in split-merge or population moves and is never
-        emptied for reuse; under the Indian buffet process its activation probability has a
-        Beta(1, 1) prior (the remaining ``max_components - n_init`` slots keep the IBP and hold
-        whatever structure the pinned components leave). Because a pinned component has the
-        same identity in every chain and draw, its membership and activation probabilities can
-        be checked for convergence entry by entry without matching (``pinned_components``).
+        are still sampled, but it takes no part in split-merge or population moves and its slot
+        is never cleared for a new component (the Gibbs updates can still empty it when the data
+        stop supporting it, which ``pinned_components`` reports as a support below 1); under the
+        Indian buffet process its activation probability has a Beta(1, 1) prior (the remaining
+        ``max_components - n_init`` slots keep the IBP and hold whatever structure the pinned
+        components leave). Because a pinned component keeps its slot in every chain and draw,
+        its membership and activation probabilities can be checked for convergence entry by
+        entry without matching (``pinned_components``). Under the OR model a free slot can
+        still come to cover the same entries, so the matched summary (``robust_components``)
+        remains a useful cross-check.
         Built to refit the robust components of a first fit (``robust_components``) as a model
         with their number fixed; start each chain from a different ``RobustComponents.sample``
         so that the chains begin dispersed. Needs ``births="slots"`` and
