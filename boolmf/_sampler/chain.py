@@ -64,6 +64,8 @@ class ChainConfig:
     likelihood_power: float = 1.0     # zeta < 1: coarsened posterior, likelihood^zeta x prior
     population: str = ""              # settings of the population moves ("" = independent)
     feature_groups: object = None     # int64 group code per feature: rates per group (None: one)
+    n_pinned: int = 0                 # slots na .. na + n_pinned - 1 keep their init component
+    pinned_ab: tuple = (1.0, 1.0)     # Beta prior on a pinned component's activation probability
     verbose: int = 0
 
 
@@ -334,7 +336,13 @@ def chain_steps(V, cfg, seed, init, population=False, resume=None):
     na = len(cfg.anchor_members)
     free = np.zeros(K, bool)
     free[na:] = True
-    Kf = max(1, K - na)
+    # pinned slots keep the component they start with: no split-merge or population moves and,
+    # under the IBP, a Beta(pinned_ab) activation probability instead of the IBP's, so they
+    # are never emptied for reuse; the other free slots ("movable") behave as before
+    pinned = np.zeros(K, bool)
+    pinned[na:na + cfg.n_pinned] = True
+    movable = free & ~pinned
+    Kf = max(1, int(movable.sum()))
     mem_mask = free.copy()
     for a, learned in enumerate(cfg.anchor_learned):
         mem_mask[a] = bool(learned)
@@ -423,24 +431,24 @@ def chain_steps(V, cfg, seed, init, population=False, resume=None):
             engine.update_memberships(V, U, _logit(rho), act_ptr, act_idx, mem_mask, rng,
                                       cfg.metropolis)
             nmem = U.sum(0, dtype=np.int64)
-            phantom = free & (nmem == 0)
+            phantom = movable & (nmem == 0)
             if phantom.any() and cfg.nonparametric:
                 Z[:, phantom] = 0                  # memberless slots carry no carriers
             mem_ptr, mem_idx = _csr(U)
             engine.update_activations(V, Z, _logit(pi), mem_ptr, mem_idx, act_mask, rng,
                                       cfg.metropolis)
         nact = Z.sum(0, dtype=np.int64)
-        orphan = free & (nact == 0)
+        orphan = movable & (nact == 0)
         if orphan.any() and cfg.nonparametric:
             U[:, orphan] = 0                       # carrier-less slots keep no members
         nmem = U.sum(0, dtype=np.int64)
         if cfg.births == "slots" and cfg.n_split_merge > 0:
-            phantom = free & (nmem == 0)
+            phantom = movable & (nmem == 0)
             if phantom.any():
                 Z[:, phantom] = 0                  # so every free slot is used or empty
             zprior = (alpha / Kf, 1.0) if cfg.nonparametric else \
                 ((apri.a, apri.b) if apri is not None else (1.0, 1.0))
-            engine.split_merge(V, Z, U, free, zprior, (ra, rb), cfg.n_split_merge,
+            engine.split_merge(V, Z, U, movable, zprior, (ra, rb), cfg.n_split_merge,
                                cfg.n_launch, rng, sm_stats)
             nmem = U.sum(0, dtype=np.int64)
             nact = Z.sum(0, dtype=np.int64)
@@ -448,7 +456,7 @@ def chain_steps(V, cfg, seed, init, population=False, resume=None):
             # pi and rho are redrawn below from the (possibly changed) state, as after split-merge
             zp = (alpha / Kf, 1.0) if cfg.nonparametric else \
                 ((apri.a, apri.b) if apri is not None else (1.0, 1.0))
-            yield ("moves", Member(Z, U, engine, free, zp, (ra, rb)))
+            yield ("moves", Member(Z, U, engine, movable, zp, (ra, rb)))
             nmem = U.sum(0, dtype=np.int64)
             nact = Z.sum(0, dtype=np.int64)
 
@@ -465,13 +473,18 @@ def chain_steps(V, cfg, seed, init, population=False, resume=None):
         if cfg.births != "slots":
             pass
         elif cfg.nonparametric:
-            pi_f = rng.beta(alpha / Kf + nact[free], 1.0 + n - nact[free])
-            pi_f = np.clip(pi_f, 1e-300, 1 - 1e-12)
-            if cfg.alpha_prior.fixed is None:
-                rate = cfg.alpha_prior.rate - np.log(pi_f).sum() / Kf
-                alpha = rng.gamma(cfg.alpha_prior.shape + Kf, 1.0 / rate)
             pi = np.ones((1, K))
-            pi[0, free] = pi_f
+            if movable.any():
+                pi_f = rng.beta(alpha / Kf + nact[movable], 1.0 + n - nact[movable])
+                pi_f = np.clip(pi_f, 1e-300, 1 - 1e-12)
+                if cfg.alpha_prior.fixed is None:
+                    rate = cfg.alpha_prior.rate - np.log(pi_f).sum() / Kf
+                    alpha = rng.gamma(cfg.alpha_prior.shape + Kf, 1.0 / rate)
+                pi[0, movable] = pi_f
+            if cfg.n_pinned:
+                pa, pb = cfg.pinned_ab
+                pi[0, pinned] = np.clip(rng.beta(pa + nact[pinned], pb + n - nact[pinned]),
+                                        1e-300, 1 - 1e-12)
         elif apri is None or apri.kind != "fixed":
             prior_z = apri or LevelPrior("beta", "component", 1.0, 1.0)
             rates = _level_rates(prior_z, Z, np.flatnonzero(free), rng, n, mix_z)
@@ -535,7 +548,7 @@ def chain_steps(V, cfg, seed, init, population=False, resume=None):
             d_srates.setdefault(kind, []).append(v)
         if spread is not None:
             d_spread.append(spread)
-        used = np.flatnonzero((nmem > 0) & (nact > 0) | ~free)
+        used = np.flatnonzero((nmem > 0) & (nact > 0) | ~free | pinned)
         lam = engine.slot_rates(used)
         if lam is not None:
             d_slot_rates.append((used.astype(np.int32), lam.astype(np.float64)))
