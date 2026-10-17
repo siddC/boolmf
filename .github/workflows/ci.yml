@@ -43,8 +43,8 @@ jobs:
       - run: pip install -e ".[test]"
       - run: pytest -q -m "not slow"
 
-  # The tests against the built wheel, not the source tree: with the src layout the checkout
-  # cannot shadow the installed package, so a file left out of the wheel fails here.
+  # Smoke test of the built wheel, not the source tree: every module imports and both
+  # estimators fit a tiny matrix, so a file left out of the wheel fails here.
   wheel:
     runs-on: ubuntu-latest
     steps:
@@ -54,9 +54,8 @@ jobs:
           python-version: "3.13"
       - run: pip install build
       - run: python -m build
-      - run: pip install "$(ls dist/*.whl)[test]"
-      - run: python -c "import boolmf, pathlib; assert 'site-packages' in pathlib.Path(boolmf.__file__).parts, boolmf.__file__"
-      - run: pytest -q -m "not slow"
+      - run: pip install dist/*.whl
+      - run: cp .github/smoke_test.py "$RUNNER_TEMP" && cd "$RUNNER_TEMP" && python smoke_test.py
 
   # The one check to require in the branch ruleset. It passes only if every job above
   # succeeded, so the ruleset does not change when the matrix does. `if: always()` makes

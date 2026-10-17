@@ -248,8 +248,9 @@
 
 ### Changed
 - The package moved to a src layout (`src/boolmf`). The repository root no longer shadows an
-  installed boolmf, so the tests run against what was installed, and CI gains a job that builds
-  the wheel, installs it and runs the tests on it (a module left out of the wheel now fails CI).
+  installed boolmf, so the tests run against what was installed, and CI gains a smoke test of
+  the built wheel: every module imports from the install and both estimators fit a tiny
+  matrix (a module left out of the wheel now fails CI).
   `pip install -e .` and imports are unchanged.
 - Chains run in parallel (`n_jobs`) share the cores numba may use (`NUMBA_NUM_THREADS`)
   instead of all cores of the machine.
