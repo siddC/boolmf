@@ -247,6 +247,11 @@
   published overestimate at 20% flips.
 
 ### Changed
+- The package moved to a src layout (`src/boolmf`). The repository root no longer shadows an
+  installed boolmf, so the tests run against what was installed, and CI gains a smoke test of
+  the built wheel: every module imports from the install and both estimators fit a tiny
+  matrix (a module left out of the wheel now fails CI).
+  `pip install -e .` and imports are unchanged.
 - Chains run in parallel (`n_jobs`) share the cores numba may use (`NUMBA_NUM_THREADS`)
   instead of all cores of the machine.
 - Per-sample rates under `or_flip` cost less with many component slots: the likelihood tables

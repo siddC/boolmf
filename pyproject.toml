@@ -53,13 +53,13 @@ Repository = "https://github.com/siddC/boolmf"
 Issues = "https://github.com/siddC/boolmf/issues"
 
 [tool.hatch.version]
-path = "boolmf/__init__.py"
+path = "src/boolmf/__init__.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["boolmf", "tests", "README.md", "LICENSE", "CHANGELOG.md", "pyproject.toml"]
+include = ["src/boolmf", "tests", "README.md", "LICENSE", "CHANGELOG.md", "pyproject.toml"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["boolmf"]
+packages = ["src/boolmf"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -73,6 +73,7 @@ filterwarnings = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "NPY"]
