@@ -3,6 +3,23 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `examples/bbmf_zeta_sweep.py`: choose ζ (`likelihood_power`) for BBMF phylons. One
+  discovery fit per ζ on the same held-out cells (`bbmf_phylons.py --skip-refit`, run in turn or
+  several at a time), then one table: robust components, components per draw, held-out
+  log-likelihood (full posterior and the OR of the robust L and A) and precision / recall / F1
+  on the validation and the test cells with 95% intervals from resampling genomes, R-hat of the
+  rates, robust-set stability and run time, plus a table of how many robust components of each
+  ζ are found again at every other ζ. Finished runs are skipped and interrupted ones resume.
+- `examples/bbmf_phylons.py`: the held-out cells (now 10% by default) are split into a
+  validation half and a test half (`--test-share`), each scored separately with genome-resampled
+  95% intervals (`--bootstrap`); gene frequencies and the minority coding use training cells
+  only. `--holdout 0` fits all cells (the final fit). `--skip-refit` stops after the discovery
+  stage. `--max-components` defaults to min(genes, genomes), a bound no Boolean rank exceeds.
+  `--compare-L` / `--compare-A` score other binarized phylons (for example NMF phylons, matched
+  by gene and genome name, `--genome-alias OLD=NEW`) on the same cells. New outputs:
+  `stage1_phylons.csv`, per-chain population rates in the diagnostics, and `heldout.npy` holding
+  every cell's role (training, validation, test, missing). The progress log reports one line
+  per checkpoint of the slowest chain.
 - `pin_init` for `BayesianBooleanMF`: with a tuple `init` (or one per chain), every init
   component keeps its own slot in every chain. Its members and carriers are still sampled, but
   it takes no part in split-merge or population moves, is never emptied for reuse, and under
