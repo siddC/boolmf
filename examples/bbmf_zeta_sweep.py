@@ -10,7 +10,10 @@ interrupted ones resume, so rerunning the same command continues the sweep.
 Outputs (in out_dir)
 --------------------
 zeta_sweep.csv          one row per ζ (and one for --compare-L/-A phylons): robust components,
-                        components per draw, held-out log-likelihood (full posterior and the OR
+                        components per draw, median support and share found in every chain,
+                        R-hat below 1.1 for core and margin entries, how many compared phylons
+                        a robust component recovers (genome Jaccard >= 0.9 and >= 0.5),
+                        held-out log-likelihood (full posterior and the OR
                         of the robust L and A) on validation and test cells with genome-resampled
                         95% intervals, precision / recall / F1, R-hat of the rates and the
                         log-likelihood, robust-set stability, hours
@@ -170,8 +173,20 @@ def summarize(a, fh):
         diag = json.load(open(os.path.join(d, "diagnostics.json")))
         s1 = diag["stage1"]
         stab = s1.get("stability") or []
+        rob = np.load(os.path.join(d, "stage1", "robust.npz"))
+        cm = s1.get("entry_convergence_core_margin") or {}
+        match = s1.get("compare_match") or {}
         row = {"zeta": z, "robust_components": s1["n_robust"],
                "other_components_per_draw": s1["transient_per_draw"],
+               "support_median": float(np.median(rob["support"])) if rob["support"].size
+               else None,
+               "in_all_chains": float(np.mean((rob["chain_support"] > 0).all(1)))
+               if rob["support"].size else None,
+               "members_core_rhat_ok": cm.get("members_core_rhat_below_1.1"),
+               "members_margin_rhat_ok": cm.get("members_margin_rhat_below_1.1"),
+               "activations_margin_rhat_ok": cm.get("activations_margin_rhat_below_1.1"),
+               "compare_recovered_0.9": match.get("recovered_0.9"),
+               "compare_recovered_0.5": match.get("recovered_0.5"),
                "slots": s1.get("slots"), "slots_used_median": s1.get("slots_used_median")}
         row.update(_metrics("full", s1.get("heldout_full_posterior")))
         row.update(_metrics("LA", s1.get("heldout_robust_LA")))
@@ -210,7 +225,9 @@ def summarize(a, fh):
             per.loc[f"zeta {zi:g}", f"zeta {zj:g}"] = float(hit.mean())
     tab.to_csv(os.path.join(a.out, "zeta_sweep.csv"), index_label="run")
     per.to_csv(os.path.join(a.out, "zeta_persistence.csv"), index_label="robust_of")
-    show = [c for c in ("robust_components", "other_components_per_draw", "validation_full_ll",
+    show = [c for c in ("robust_components", "other_components_per_draw", "support_median",
+                        "in_all_chains", "members_margin_rhat_ok", "compare_recovered_0.9",
+                        "validation_full_ll",
                         "validation_LA_ll", "validation_F1", "test_full_ll", "test_LA_ll",
                         "test_precision", "test_recall", "test_F1", "rhat_detection",
                         "rhat_background", "stability_first_window", "hours")
