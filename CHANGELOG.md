@@ -3,6 +3,14 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- ζ-sweep table columns: median support of the robust components and the share found in every
+  chain, R-hat below 1.1 for core and margin entries, and how many compared phylons (for example
+  NMF phylons) a robust component recovers at genome Jaccard >= 0.9 and >= 0.5
+  (`compare_match` in each run's diagnostics). `bbmf_phylons.py` also writes
+  `phylon_gene_content.csv.gz`: P(gene present) averaged over each phylon's genomes, from the
+  posterior predictive and weighted by A, for every gene on the presence scale. L stays on the
+  minority-coded scale (for an absence-coded gene, membership means jointly absent), so 1 - L
+  is not a probability of presence; the gene content is the view comparable to NMF phylons.
 - `examples/bbmf_zeta_sweep.py`: choose ζ (`likelihood_power`) for BBMF phylons. One
   discovery fit per ζ on the same held-out cells (`bbmf_phylons.py --skip-refit`, run in turn or
   several at a time), then one table: robust components, components per draw, held-out

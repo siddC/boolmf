@@ -46,7 +46,15 @@ OR-ing L and A reproduces it only approximately (it treats entries as independen
 
 Outputs (in out_dir)
 --------------------
-L.csv.gz, A.csv.gz          refit phylons: genes x phylons and phylons x genomes probabilities
+L.csv.gz, A.csv.gz          refit phylons: genes x phylons and phylons x genomes probabilities.
+                            L is on the minority-coded scale: for a presence-coded gene (see
+                            genes.csv) L[g, k] = P(g is jointly present in phylon k's genomes),
+                            for an absence-coded gene P(g is jointly absent there). 1 - L is the
+                            probability that the phylon says nothing about g, not a probability
+                            of presence.
+phylon_gene_content.csv.gz  genes x phylons: P(gene present) averaged over each phylon's genomes
+                            (from the posterior predictive, weighted by A), for every gene on
+                            the presence scale; comparable to the gene content of NMF phylons
 stage1_L.csv.gz, stage1_A.csv.gz   the robust components of the discovery stage
 stage1_phylons.csv          per robust component of the discovery stage
 phylons.csv                 per phylon: support, genes present / absent, genomes, R-hat
@@ -357,7 +365,31 @@ def compare_set(D):
         b = ((x & ~c & t).sum(1) + 1) / ((~c & t).sum(1) + 2)
         P[:, cols] = np.where(c, a[:, None], b[:, None])
     P1 = np.where(D["absence"][None, :], 1.0 - P, P)
+    COMPARE.update(names=np.asarray(common), genomes=Ab)
     return {**info, "evaluation": evaluate(D, P1, covered)}
+
+
+COMPARE = {}                                  # genome sets of the compared phylons
+
+
+def match_compare(rc):
+    """How well the components' genome sets (activation >= 0.5) recover the compared phylons:
+    for each, the best genome Jaccard, and how many reach 0.9 and 0.5."""
+    if not COMPARE or rc.n_components == 0:
+        return None
+    Gc = COMPARE["genomes"].astype(np.float32)                  # compared x genomes
+    G = (rc.activations >= 0.5).T.astype(np.float32)            # components x genomes
+    inter = Gc @ G.T
+    J = inter / np.maximum(Gc.sum(1)[:, None] + G.sum(1)[None, :] - inter, 1)
+    best = J.max(1)
+    return {"recovered_0.9": int((best >= 0.9).sum()), "recovered_0.5": int((best >= 0.5).sum()),
+            "best_genome_jaccard": {str(k): float(v) for k, v in zip(COMPARE["names"], best)}}
+
+
+def support_summary(rc):
+    return {"support_median": float(np.median(rc.support)) if rc.n_components else None,
+            "in_all_chains": float(np.mean((rc.chain_support > 0).all(1)))
+            if rc.n_components else None}
 
 
 def core_margin(rc):
@@ -508,6 +540,7 @@ def discovery(D):
     summary = {
         "seconds": seconds, "zeta": ARGS.zeta, "slots": n_slots(D),
         "n_robust": rc.n_components, "transient_per_draw": transient,
+        **support_summary(rc), "compare_match": match_compare(rc),
         "slots_used_median": float(np.median(m.n_components_draws_)),
         "rhat": m.rhat_, "rates_by_chain": rates_by_chain(m),
         "log_likelihood_chain_spread": chain_spread(m),
@@ -586,6 +619,7 @@ def refit(D, rc1, s1):
     det, bg = per_cell_rates(m, coding)
     summary = {
         "seconds": seconds, "n_pinned": K, "free_slots": free, "rhat": m.rhat_,
+        "compare_match": match_compare(pc),
         "rates_by_chain": rates_by_chain(m),
         "log_likelihood_chain_spread": chain_spread(m),
         "split_merge_acceptance": m.split_merge_acceptance_,
@@ -687,6 +721,12 @@ def main():
     pred = m.predictive_probability()                            # minority-coded scale
     pred = np.where(D["absence"][None, :], 1.0 - pred, pred)     # P(gene present)
     np.save(os.path.join(OUT, "predictive.npy"), pred.T.astype(np.float32))
+    # gene content of each phylon: P(gene present) averaged over the phylon's genomes, weighted
+    # by their activation probabilities (all genes, on the presence scale, like NMF phylons)
+    W = pc.activations                                           # genomes x phylons
+    content = (W.T @ pred) / np.maximum(W.sum(0), 1e-12)[:, None]
+    pd.DataFrame(content.T, index=D["genes"], columns=names).round(4).to_csv(
+        os.path.join(OUT, "phylon_gene_content.csv.gz"), index_label="gene")
     write_diagnostics(D, s1, s2, comparison)
     c = s2["entry_convergence"]
     log(f"done: {pc.n_components} phylons; R-hat < 1.1 for "
