@@ -167,7 +167,15 @@ def main():
                else {}}
     json.dump(summary, open(os.path.join(a.out, "consensus_summary.json"), "w"), indent=1)
     print(json.dumps(summary, indent=1))
-    best = max(range(R), key=lambda r: len(sets[r][0]))
+    # the refit starts from a run's saved discovery draws; runs from before they were saved
+    # (no stage1/draw_states.npz) would start with empty free slots, so prefer the others
+    has_states = [os.path.exists(os.path.join(r["dir"], "stage1", "draw_states.npz"))
+                  for r in runs]
+    best = max(range(R), key=lambda r: (has_states[r], len(sets[r][0])))
+    if not has_states[best]:
+        print("\nwarning: no run has stage1/draw_states.npz (runs from before it was saved); "
+              "the refit will start with empty free slots, and the pinned phylons may absorb "
+              "structure the discovery held elsewhere")
     print("\nfinal refit (pins the consensus phylons, starts from the discovery draws of one run;"
           " use that run's settings):\n"
           f"python examples/bbmf_phylons.py P_MATRIX {os.path.join(a.out, 'refit')} "
