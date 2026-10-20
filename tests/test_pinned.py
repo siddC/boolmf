@@ -194,3 +194,25 @@ def test_pin_init_runs_with_groups_rates_and_population(planted):
                           n_draws=10, thin=1, random_state=0).fit(X)
     pc = m.pinned_components()
     assert pc.n_components == rc.n_components and (pc.support > 0.9).all()
+
+
+def test_pin_init_int_pins_the_leading_components(planted):
+    X, _, rc = planted
+    k = rc.n_components
+    rng = np.random.default_rng(0)
+    starts = []
+    for c in range(3):
+        M, A = rc.sample(random_state=c)
+        extra_m = rng.random((2, X.shape[1])) < 0.1       # two more components, not pinned
+        extra_a = rng.random((X.shape[0], 2)) < 0.1
+        starts.append((np.vstack([M, extra_m]), np.hstack([A, extra_a])))
+    m = BayesianBooleanMF(pin_init=k, init=starts, max_components=k + 10, **FAST).fit(X)
+    assert m.n_pinned_ == k
+    pc = m.pinned_components()
+    assert pc.n_components == k
+    for j in range(k):
+        assert np.abs(pc.members[j] - rc.members[j]).max() < 0.35
+    with pytest.raises(ValueError, match="has only"):
+        BayesianBooleanMF(pin_init=k + 5, init=starts, max_components=k + 10, **FAST).fit(X)
+    with pytest.raises(ValueError, match="bool or an int"):
+        BayesianBooleanMF(pin_init=-1, init=starts, **FAST).fit(X)

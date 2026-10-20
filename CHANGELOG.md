@@ -3,6 +3,21 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `pin_init` also takes an int k: only the first k components of each chain's init are pinned,
+  and the rest start in free slots. A refit can then start from a complete state of a first
+  fit: its robust components, then the other components of one of its draws.
+- Consensus over independent runs (stability selection) in the phylon workflow.
+  - `bbmf_phylons.py --run-seed` makes runs that differ only in their chains.
+  - `examples/bbmf_consensus.py` keeps the phylons found in at least `--min-runs` runs (mutual
+    best matches, cell Jaccard >= 0.5) and averages their probabilities.
+  - `bbmf_phylons.py --discovery RUN_DIR --pinned consensus.npz` refits the consensus phylons
+    from a finished run's discovery stage.
+  - The refit now starts each chain from the last draw of a discovery chain: the pinned
+    components as they appear in it, and its other components in free slots
+    (`stage1/draw_states.npz`, saved by the discovery stage). Starting with empty free slots
+    made the pinned phylons absorb the structure the discovery held elsewhere. In the final
+    GENOMiCUS-4k fit their member entries grew by 65% (median genes per phylon 21 -> 38), and
+    refit phylons of two runs matched only 36%, against 58% for their discovery robust sets.
 - ζ-sweep table columns: median support of the robust components and the share found in every
   chain, R-hat below 1.1 for core and margin entries, and how many compared phylons (for example
   NMF phylons) a robust component recovers at genome Jaccard >= 0.9 and >= 0.5
