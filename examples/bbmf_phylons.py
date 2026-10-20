@@ -28,7 +28,15 @@ What it does
    A is a fair convergence check (over the draws in which the component is present). These
    are the phylons; a pinned component that the refit empties in most draws
    (``supported_in_refit`` False in phylons.csv) is not supported once the others are fixed.
-   --skip-refit stops after the discovery stage (for parameter sweeps).
+   --skip-refit stops after the discovery stage (for parameter sweeps). The refit starts each
+   chain from the last draw of a discovery chain: the pinned components as they appear in
+   that draw, and the draw's other components in free slots, so the refit continues from a
+   complete posterior state instead of rebuilding the other structure from empty slots
+   (which made the pinned components absorb it). Runs from before draw states were saved
+   start from draws of the probabilities instead.
+4. Consensus over independent runs (bbmf_consensus.py): runs that differ only in --run-seed,
+   the components found in at least --min-runs of them, then a refit that pins those
+   (--discovery RUN_DIR --pinned consensus.npz).
 
 Held-out metrics, for the validation and the test cells separately: mean log-likelihood per
 cell (full posterior and the OR of L and A), overall and by gene-frequency band, and
@@ -114,6 +122,14 @@ def parse():
     p.add_argument("--checkpoint-every", type=int, default=250)
     p.add_argument("--skip-refit", action="store_true",
                    help="stop after the discovery stage (parameter sweeps)")
+    p.add_argument("--run-seed", type=int, default=0,
+                   help="seed of the chains (NMF starts, discovery, refit); independent runs "
+                        "for bbmf_consensus.py differ only here. The held-out cells use --seed")
+    p.add_argument("--discovery", metavar="RUN_DIR",
+                   help="reuse the discovery stage of a finished run instead of running one")
+    p.add_argument("--pinned", metavar="NPZ",
+                   help="components to pin in the refit instead of the discovery's robust "
+                        "components, e.g. consensus.npz from bbmf_consensus.py")
     p.add_argument("--compare-L", help="binarized L (genes x phylons) of phylons to compare")
     p.add_argument("--compare-A", help="binarized A (phylons x genomes) of phylons to compare")
     p.add_argument("--compare-name", default="NMF phylons", help="label of the compared set")
@@ -122,6 +138,8 @@ def parse():
     p.add_argument("--quick", action="store_true",
                    help="a short run to check the pipeline (200 + 100 sweeps)")
     a = p.parse_args()
+    if a.pinned and a.skip_refit:
+        p.error("--pinned is used by the refit; drop --skip-refit")
     if bool(a.compare_L) != bool(a.compare_A):
         p.error("--compare-L and --compare-A go together")
     if not 0 <= a.holdout < 1 or not 0 <= a.test_share <= 1:
@@ -466,6 +484,12 @@ def write_LA(rc, D, names, prefix):
         os.path.join(OUT, f"{prefix}A.csv.gz"), index_label="phylon")
 
 
+def seed(base):
+    """A seed for this run: --run-seed 0 keeps the seeds of earlier versions (and their
+    checkpoints)."""
+    return int(base + 1009 * ARGS.run_seed)
+
+
 def n_slots(D):
     if ARGS.max_components == "auto":
         return int(min(D["X"].shape))
@@ -480,10 +504,38 @@ def common_params():
 
 
 # ----------------------------------------------------------------------------- stage 1
+def save_draw_states(path, m):
+    """The last stored draw of every chain (bit-packed Z and U of its used slots): starting
+    states for the refit, so that it continues from a complete state of the discovery."""
+    last = {}
+    for d in m._draws_:
+        last[d["chain"]] = d
+    out = {"n": m._n_train_samples_, "F": m.components_.shape[1]}
+    for i, (_c, d) in enumerate(sorted(last.items())):
+        out[f"Z{i}"], out[f"U{i}"] = d["Z"], d["U"]
+    np.savez_compressed(path, **out)
+
+
+def load_draw_states(path):
+    if not os.path.exists(path):
+        return None
+    z = np.load(path)
+    n, F = int(z["n"]), int(z["F"])
+    k = len([f for f in z.files if f.startswith("Z")])
+    return [(np.unpackbits(z[f"Z{i}"], axis=0, count=n).astype(bool),
+             np.unpackbits(z[f"U{i}"], axis=0, count=F).astype(bool)) for i in range(k)]
+
+
+def stage1_dir():
+    return os.path.join(ARGS.discovery or OUT, "stage1")
+
+
 def discovery(D):
-    path = os.path.join(OUT, "stage1")
-    os.makedirs(path, exist_ok=True)
+    path = stage1_dir()
     done = os.path.join(path, "summary.json")
+    if ARGS.discovery and not os.path.exists(done):
+        raise SystemExit(f"--discovery {ARGS.discovery}: no finished discovery stage there")
+    os.makedirs(path, exist_ok=True)
     if os.path.exists(done):
         log("discovery: already done, loading", path)
         rc, comp = load_rc(os.path.join(path, "robust.npz"))
@@ -501,7 +553,7 @@ def discovery(D):
         for c in range(ARGS.chains):
             t = time.time()
             est = BayesianBooleanMF(init="nmf", init_params={
-                "n_components": ARGS.init_rank, "init": "random", "random_state": c,
+                "n_components": ARGS.init_rank, "init": "random", "random_state": seed(c),
                 "max_iter": 1000})
             starts.append(est._initial_state(V, n_slots(D)))
             log(f"NMF start {c}: {starts[-1][0].shape[0]} components in "
@@ -511,7 +563,7 @@ def discovery(D):
     burn = ARGS.sweeps // 2
     m = BayesianBooleanMF(max_components=n_slots(D), burn_in=burn,
                           n_draws=max(1, (ARGS.sweeps - burn) // 5), thin=5,
-                          max_sweeps=ARGS.sweeps, random_state=100, init=starts,
+                          max_sweeps=ARGS.sweeps, random_state=seed(100), init=starts,
                           population_moves=ARGS.population_every, feature_groups=coding,
                           checkpoint_dir=os.path.join(OUT, "checkpoints", "stage1"),
                           **common_params())
@@ -555,6 +607,7 @@ def discovery(D):
     }
     del pm
     save_rc(os.path.join(path, "robust.npz"), rc, conv_comp)
+    save_draw_states(os.path.join(path, "draw_states.npz"), m)
     json.dump(jsonable(summary), open(done, "w"), indent=1)
     log(f"discovery: {rc.n_components} robust components, {transient:.0f} other components "
         f"per draw; {short(summary['heldout_full_posterior'])}")
@@ -576,20 +629,76 @@ def short(ev):
 
 
 # ----------------------------------------------------------------------------- stage 2
+def draw_starts(rc, states, n_chains):
+    """Refit starts from discovery draws: chain c starts from the last draw of discovery chain
+    c (cycling). Each component to pin takes its occurrence in that draw (the draw's component
+    with the highest cell Jaccard, at least 0.5, each used once) or, without one, its majority
+    set; the draw's other components follow in free slots. Returns the starts and the share of
+    pinned components found in each draw."""
+    M, A = rc.majority()                                         # (K, F), (n, K)
+    R, G = A.T.astype(np.float32), M.astype(np.float32)
+    starts, found = [], []
+    for c in range(n_chains):
+        Z, U = states[c % len(states)]
+        ok = Z.any(0) & U.any(0)
+        Z, U = Z[:, ok], U[:, ok]
+        J = _cell_jaccard(R, G, Z.T.astype(np.float32), U.T.astype(np.float32)) \
+            if Z.shape[1] and len(R) else np.zeros((len(R), Z.shape[1]))
+        pm, pa = M.copy(), A.copy()
+        taken, done = set(), set()
+        for flat in np.argsort(-J, axis=None):
+            k, j = divmod(int(flat), J.shape[1])
+            if J[k, j] < 0.5:
+                break
+            if k in done or j in taken:
+                continue
+            pm[k], pa[:, k] = U[:, j], Z[:, j]
+            done.add(k)
+            taken.add(j)
+        rest = [j for j in range(Z.shape[1]) if j not in taken]
+        starts.append((np.vstack([pm, U[:, rest].T]), np.hstack([pa, Z[:, rest]])))
+        found.append(len(done) / max(len(R), 1))
+    return starts, found
+
+
+def load_pinned(path, n, F):
+    z = np.load(path)
+    M, A = z["members"].astype(float), z["activations"].astype(float)
+    if M.shape[1] != F or A.shape[0] != n:
+        raise SystemExit(f"--pinned {path}: shapes {M.shape}, {A.shape} do not match the data "
+                         f"({n} genomes x {F} genes)")
+    K = M.shape[0]
+    sup = z["support"] if "support" in z.files else np.ones(K)
+    rc = RobustComponents(M, A, sup, np.zeros((K, 1)))
+    extra = {k: z[k] for k in ("n_runs", "support") if k in z.files}
+    return rc, extra
+
+
 def refit(D, rc1, s1):
     coding = np.where(D["absence"], "absence", "presence")
     K = rc1.n_components
-    if ARGS.free_slots == "auto":
-        free = int(max(100, np.ceil(2 * s1["transient_per_draw"])))
-        free = min(free, max(100, int(min(D["X"].shape)) - K))   # at most min(n, F) slots
+    states = load_draw_states(os.path.join(stage1_dir(), "draw_states.npz"))
+    if states:
+        starts, found = draw_starts(rc1, states, ARGS.chains)
+        extra = max(s[0].shape[0] for s in starts) - K
+        start_kind = "discovery draws"
+        log(f"refit: starting from discovery draws; components to pin found in them: "
+            f"{np.round(found, 2).tolist()}")
     else:
-        free = int(ARGS.free_slots)
-    starts = [rc1.sample(random_state=1000 + c) for c in range(ARGS.chains)]
+        starts = [rc1.sample(random_state=seed(1000) + c) for c in range(ARGS.chains)]
+        extra, found, start_kind = 0, None, "sampled from the probabilities"
+        log("refit: no discovery draw states (older run); starting from draws of the "
+            "probabilities")
+    if ARGS.free_slots == "auto":
+        free = int(max(100, np.ceil(2 * s1["transient_per_draw"]), extra + 50))
+        free = min(free, max(extra + 50, int(min(D["X"].shape)) - K))  # about min(n, F) slots
+    else:
+        free = max(int(ARGS.free_slots), extra)
     burn = ARGS.refit_sweeps // 2
     m = BayesianBooleanMF(max_components=K + free, burn_in=burn,
                           n_draws=max(1, (ARGS.refit_sweeps - burn) // 5), thin=5,
-                          max_sweeps=ARGS.refit_sweeps, random_state=200, init=starts,
-                          pin_init=True, feature_groups=coding, n_jobs=ARGS.chains,
+                          max_sweeps=ARGS.refit_sweeps, random_state=seed(200), init=starts,
+                          pin_init=K, feature_groups=coding, n_jobs=ARGS.chains,
                           checkpoint_dir=os.path.join(OUT, "checkpoints", "stage2"),
                           **common_params())
     log(f"refit: {K} pinned components + {free} free slots, {ARGS.chains} independent chains "
@@ -619,6 +728,8 @@ def refit(D, rc1, s1):
     det, bg = per_cell_rates(m, coding)
     summary = {
         "seconds": seconds, "n_pinned": K, "free_slots": free, "rhat": m.rhat_,
+        "start": start_kind, "pinned_found_in_start_draws": found,
+        "pinned_from": ARGS.pinned or "discovery robust components",
         "compare_match": match_compare(pc),
         "rates_by_chain": rates_by_chain(m),
         "log_likelihood_chain_spread": chain_spread(m),
@@ -701,13 +812,19 @@ def main():
         log("done (discovery only): " + ("no robust components" if rc1.n_components == 0
                                          else f"{rc1.n_components} robust components"))
         return
-    m, pc, comp_rhat, s2 = refit(D, rc1, s1)
+    if ARGS.pinned:
+        rcp, pinned_info = load_pinned(ARGS.pinned, len(D["genomes"]), len(D["genes"]))
+        log(f"refit: pinning {rcp.n_components} components from {ARGS.pinned}")
+        info = {f"consensus_{k}": v for k, v in pinned_info.items()}
+    else:
+        rcp = rc1
+        info = {"stage1_support": rc1.support,
+                "stage1_chains_present": (rc1.chain_support > 0).sum(1)}
+    m, pc, comp_rhat, s2 = refit(D, rcp, s1)
     names = [f"phylon_{k + 1}" for k in range(pc.n_components)]
     write_LA(pc, D, names, "")
     phylon_table(names, pc, D, comp_rhat, {
-        "stage1_support": rc1.support,
-        "stage1_chains_present": (rc1.chain_support > 0).sum(1),
-        "support": pc.support,
+        **info, "support": pc.support,
         "supported_in_refit": pc.support >= 0.5}).to_csv(os.path.join(OUT, "phylons.csv"),
                                                          index=False)
     genes["n_phylons"] = (pc.members >= 0.5).sum(0)

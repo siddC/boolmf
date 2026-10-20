@@ -397,9 +397,12 @@ or None
     init_params : dict or None, default=None
         Keyword arguments for ``sklearn.decomposition.NMF`` when ``init="nmf"`` (plus
         ``binarize_clusters``, see ``init``), or for Asso when ``init="asso"``.
-    pin_init : bool, default=False
+    pin_init : bool or int, default=False
         With a tuple ``init`` (or a list of them, all with the same number of components):
-        every component of ``init`` keeps its own slot in every chain. Its members and carriers
+        every component of ``init`` keeps its own slot in every chain. An int k pins only the
+        first k components of every chain's init; the others start in free slots, so a refit
+        can start from a complete state of a first fit (its robust components first, then the
+        rest of one of its draws). Its members and carriers
         are still sampled, but it takes no part in split-merge or population moves and its slot
         is never cleared for a new component (the Gibbs updates can still empty it when the data
         stop supporting it, which ``pinned_components`` reports as a support below 1); under the
@@ -766,6 +769,9 @@ or None
                              "(members, activations) tuple or a list of them (one per chain); "
                              f"got {self.init!r}.")
         self._check_population()
+        if self.pin_init is not None and not isinstance(self.pin_init, (bool, np.bool_)) and (
+                not isinstance(self.pin_init, numbers.Integral) or self.pin_init < 0):
+            raise ValueError(f"pin_init must be a bool or an int >= 0; got {self.pin_init!r}.")
         if self.pin_init:
             if not isinstance(self.init, (tuple, list)):
                 raise ValueError("pin_init needs init as a (members, activations) tuple or a "
@@ -922,10 +928,16 @@ or None
         n_pinned = 0
         if self.pin_init:
             sizes = {x[0].shape[0] for x in inits}
-            if len(sizes) != 1:
-                raise ValueError("pin_init needs the same number of components in every "
-                                 f"chain's init; got {sorted(sizes)}.")
-            n_pinned = sizes.pop()
+            if isinstance(self.pin_init, (bool, np.bool_)):
+                if len(sizes) != 1:
+                    raise ValueError("pin_init needs the same number of components in every "
+                                     f"chain's init; got {sorted(sizes)}.")
+                n_pinned = sizes.pop()
+            else:                                # pin the first pin_init components
+                n_pinned = int(self.pin_init)
+                if n_pinned > min(sizes):
+                    raise ValueError(f"pin_init={n_pinned} but a chain's init has only "
+                                     f"{min(sizes)} components.")
             if n_pinned > n_free:
                 raise ValueError(f"pin_init: {n_pinned} init components do not fit in "
                                  f"{n_free} slots; raise max_components (or n_components).")
