@@ -184,6 +184,11 @@ def main():
           f"--chains {runs[0]['args'].get('chains')} --run-seed "
           f"{runs[best]['args'].get('run_seed', 0)} --threads N [--compare-L ... --compare-A "
           "...]")
+    print("\nfor the final phylons, run that refit from the discovery draws of each run that "
+          "saved them (--discovery and --run-seed of that run, its own output directory), then "
+          "average the refits:\n"
+          f"python examples/bbmf_final.py {os.path.join(a.out, 'final')} REFIT_DIR REFIT_DIR "
+          "[...]")
 
 
 if __name__ == "__main__":

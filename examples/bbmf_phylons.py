@@ -37,6 +37,9 @@ What it does
 4. Consensus over independent runs (bbmf_consensus.py): runs that differ only in --run-seed,
    the components found in at least --min-runs of them, then a refit that pins those
    (--discovery RUN_DIR --pinned consensus.npz).
+5. Final phylons (bbmf_final.py): the consensus refit repeated from the discovery draws of
+   each run; the phylons supported in every refit, with L and A averaged over the refits
+   (tier 1: found in every run, tier 2: in fewer).
 
 Held-out metrics, for the validation and the test cells separately: mean log-likelihood per
 cell (full posterior and the OR of L and A), overall and by gene-frequency band, and
