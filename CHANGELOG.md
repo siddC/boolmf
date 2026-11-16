@@ -3,6 +3,14 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `examples/bbmf_final.py`: the last step of the phylon workflow. It takes refits of the same
+  consensus started from the discovery draws of different runs, keeps the phylons supported in
+  every refit (`--min-refits`), and averages their L and A over the refits. Tier 1 is found in
+  every discovery run of the consensus, tier 2 in fewer. `phylons.csv` records every pinned
+  phylon, kept or dropped, with its support in each refit and the agreement between refits
+  (smallest pairwise Jaccard of the majority sets). On GENOMiCUS-4k, three refits of the 261
+  consensus phylons kept 233 (172 tier 1, 61 tier 2). Which phylons were found did not depend on
+  the start, but about a fifth moved their boundaries by more than 10% between starts.
 - `pin_init` also takes an int k: only the first k components of each chain's init are pinned,
   and the rest start in free slots. A refit can then start from a complete state of a first
   fit: its robust components, then the other components of one of its draws.
