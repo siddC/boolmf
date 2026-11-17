@@ -3,6 +3,9 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- `CITATION.cff` (how to cite boolmf and the papers of its methods) and `CONTRIBUTING.md`
+  (pull-request workflow, checks, and the rule that methods from papers are verified by
+  reproducing their published results).
 - `examples/bbmf_final.py`: the last step of the phylon workflow. It takes refits of the same
   consensus started from the discovery draws of different runs, keeps the phylons supported in
   every refit (`--min-refits`), and averages their L and A over the refits. Tier 1 is found in
@@ -295,6 +298,12 @@
   published overestimate at 20% flips.
 
 ### Changed
+- README: the status now reads 0.2 in development, and the references list the standard Boolean
+  matrix factorization papers (Asso, GreConD, PANDA+) and the later Bayesian ones (Meeds et al.
+  2007, Rukat & Yau 2019, Wagala et al. 2026, Miller & Dunson 2019). The package docstring lists
+  PANDA+.
+- Removed two wheel files (narwhals, pyreadr) committed to the repository root by mistake;
+  `*.whl` is now ignored.
 - The package moved to a src layout (`src/boolmf`). The repository root no longer shadows an
   installed boolmf, so the tests run against what was installed, and CI gains a smoke test of
   the built wheel: every module imports from the install and both estimators fit a tiny

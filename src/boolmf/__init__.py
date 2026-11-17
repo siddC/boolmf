@@ -3,7 +3,8 @@
 A binary matrix X (samples x features) is modelled as the Boolean product of two binary
 matrices: components (sets of features) and their usage by each sample.
 
-* ``BooleanMF``: standard algorithms (Asso, GreConD) that search for the factor matrices.
+* ``BooleanMF``: standard algorithms (Asso, GreConD, PANDA+) that search for the factor
+  matrices.
 * ``BayesianBooleanMF``: a Bayesian model with a noisy-OR likelihood and an Indian buffet
   process prior on the number of components, sampled by MCMC.
 """

@@ -1,0 +1,98 @@
+cff-version: 1.2.0
+message: "If you use boolmf, please cite it, and the papers of the methods you use (listed below)."
+title: "boolmf: Boolean matrix factorization with a scikit-learn API"
+type: software
+authors:
+  - family-names: "Chauhan"
+    given-names: "Siddharth"
+repository-code: "https://github.com/siddC/boolmf"
+license: BSD-3-Clause
+keywords:
+  - boolean matrix factorization
+  - noisy-or
+  - indian buffet process
+  - bayesian nonparametrics
+  - mcmc
+references:
+  - type: article
+    title: "The discrete basis problem"
+    authors:
+      - {family-names: Miettinen, given-names: Pauli}
+      - {family-names: Mielikäinen, given-names: Taneli}
+      - {family-names: Gionis, given-names: Aristides}
+      - {family-names: Das, given-names: Gautam}
+      - {family-names: Mannila, given-names: Heikki}
+    journal: "IEEE Transactions on Knowledge and Data Engineering"
+    volume: 20
+    issue: 10
+    start: 1348
+    end: 1362
+    year: 2008
+  - type: article
+    title: "Discovery of optimal factors in binary data via a novel method of matrix decomposition"
+    authors:
+      - {family-names: Belohlavek, given-names: Radim}
+      - {family-names: Vychodil, given-names: Vilem}
+    journal: "Journal of Computer and System Sciences"
+    volume: 76
+    issue: 1
+    start: 3
+    end: 20
+    year: 2010
+  - type: article
+    title: "A unifying framework for mining approximate top-k binary patterns"
+    authors:
+      - {family-names: Lucchese, given-names: Claudio}
+      - {family-names: Orlando, given-names: Salvatore}
+      - {family-names: Perego, given-names: Raffaele}
+    journal: "IEEE Transactions on Knowledge and Data Engineering"
+    volume: 26
+    issue: 12
+    start: 2900
+    end: 2913
+    year: 2014
+  - type: conference-paper
+    title: "A non-parametric Bayesian method for inferring hidden causes"
+    authors:
+      - {family-names: Wood, given-names: Frank}
+      - {family-names: Griffiths, given-names: Thomas L.}
+      - {family-names: Ghahramani, given-names: Zoubin}
+    collection-title: "Proceedings of the Twenty-Second Conference on Uncertainty in Artificial Intelligence (UAI)"
+    year: 2006
+  - type: conference-paper
+    title: "Bayesian Boolean matrix factorisation"
+    authors:
+      - {family-names: Rukat, given-names: Tammo}
+      - {family-names: Holmes, given-names: Chris C.}
+      - {family-names: Titsias, given-names: Michalis K.}
+      - {family-names: Yau, given-names: Christopher}
+    collection-title: "Proceedings of the 34th International Conference on Machine Learning (ICML)"
+    year: 2017
+  - type: article
+    title: "Bayesian nonparametric Boolean factor models"
+    authors:
+      - {family-names: Rukat, given-names: Tammo}
+      - {family-names: Yau, given-names: Christopher}
+    identifiers:
+      - {type: other, value: "arXiv:1907.00063"}
+    year: 2019
+  - type: article
+    title: "A Bayesian Boolean matrix factorization with application to copy number analysis in cancer"
+    authors:
+      - {family-names: Wagala}
+      - {family-names: Samur}
+      - {family-names: Parmigiani}
+    identifiers:
+      - {type: other, value: "arXiv:2606.17491"}
+    year: 2026
+  - type: article
+    title: "Robust Bayesian inference via coarsening"
+    authors:
+      - {family-names: Miller, given-names: Jeffrey W.}
+      - {family-names: Dunson, given-names: David B.}
+    journal: "Journal of the American Statistical Association"
+    volume: 114
+    issue: 527
+    start: 1113
+    end: 1125
+    year: 2019
