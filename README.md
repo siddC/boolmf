@@ -122,12 +122,26 @@ Requires Python 3.12 or later, NumPy, SciPy, scikit-learn 1.6+, numba and joblib
 
 ## Status
 
-Version 0.1 (alpha). `CHANGELOG.md` lists what is implemented and `ROADMAP.md` what comes next.
+Version 0.2 in development (alpha; not yet on PyPI). `CHANGELOG.md` lists what is implemented and
+`ROADMAP.md` what comes next. Contributions: see `CONTRIBUTING.md`. To cite boolmf, see
+`CITATION.cff`.
 
 ## References
 
+Standard Boolean matrix factorization (`BooleanMF`):
+
+- Miettinen, Mielikäinen, Gionis, Das & Mannila (2008). The discrete basis problem. IEEE Transactions on Knowledge and Data Engineering 20(10): 1348-1362.
+- Belohlavek & Vychodil (2010). Discovery of optimal factors in binary data via a novel method of matrix decomposition. Journal of Computer and System Sciences 76(1): 3-20.
+- Lucchese, Orlando & Perego (2014). A unifying framework for mining approximate top-k binary patterns. IEEE Transactions on Knowledge and Data Engineering 26(12): 2900-2913.
+
+Bayesian Boolean matrix factorization (`BayesianBooleanMF`) and its inference:
+
 - Wood, Griffiths & Ghahramani (2006). A non-parametric Bayesian method for inferring hidden causes. UAI.
+- Meeds, Ghahramani, Neal & Roweis (2007). Modeling dyadic data with binary latent factors. NIPS.
 - Rukat, Holmes, Titsias & Yau (2017). Bayesian Boolean matrix factorisation. ICML.
+- Rukat & Yau (2019). Bayesian nonparametric Boolean factor models. arXiv:1907.00063.
+- Wagala, Samur & Parmigiani (2026). A Bayesian Boolean matrix factorization with application to copy number analysis in cancer. arXiv:2606.17491.
+- Miller & Dunson (2019). Robust Bayesian inference via coarsening. Journal of the American Statistical Association 114(527): 1113-1125.
 - Jain & Neal (2004). A split-merge Markov chain Monte Carlo procedure for the Dirichlet process mixture model. Journal of Computational and Graphical Statistics.
 - Griffiths & Ghahramani (2011). The Indian buffet process: an introduction and review. JMLR.
 - Vehtari, Gelman, Simpson, Carpenter & Bürkner (2021). Rank-normalization, folding, and localization: an improved R-hat. Bayesian Analysis.

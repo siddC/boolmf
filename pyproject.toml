@@ -56,7 +56,7 @@ Issues = "https://github.com/siddC/boolmf/issues"
 path = "src/boolmf/__init__.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/boolmf", "tests", "README.md", "LICENSE", "CHANGELOG.md", "pyproject.toml"]
+include = ["src/boolmf", "tests", "README.md", "LICENSE", "CHANGELOG.md", "CITATION.cff", "pyproject.toml"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/boolmf"]
